@@ -870,30 +870,67 @@ HW_DECODE_ARGS = {
 }
 
 
+def _parse_duration_tag(value):
+    """Seconds from a Matroska DURATION tag such as '00:43:12.345000000', or None."""
+    try:
+        hours, minutes, seconds = value.split(':')
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    except (AttributeError, ValueError):
+        return None
+
+
 def get_video_stream(filepath):
-    """Codec and display rotation (degrees) of the first video stream.  The codec is None
-    when ffprobe cannot tell; the rotation is 0 for a stream without one."""
-    info = {'codec': None, 'rotation': 0}
+    """Codec, display rotation (degrees) and duration (seconds) of the first video stream.
+    The codec and duration are None when ffprobe cannot tell; the rotation is 0 for a
+    stream without one."""
+    info = {'codec': None, 'rotation': 0, 'duration': None}
     try:
         cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
-               '-show_entries', 'stream=codec_name:stream_tags=rotate:stream_side_data=rotation',
-               '-of', 'json', filepath]
+               '-show_entries', 'stream=codec_name,duration:stream_tags=rotate,DURATION'
+               ':stream_side_data=rotation', '-of', 'json', filepath]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         stream = (json.loads(result.stdout).get('streams') or [{}])[0] if result.returncode == 0 else {}
     except Exception as e:
         logging.debug(f'ffprobe video stream check failed for {filepath}: {e}')
         return info
     info['codec'] = stream.get('codec_name')
+    tags = {key.lower(): value for key, value in (stream.get('tags') or {}).items()}
     # The display matrix, or the legacy "rotate" tag older muxers wrote.
     for rotation in [d.get('rotation') for d in stream.get('side_data_list') or []] + \
-                    [(stream.get('tags') or {}).get('rotate')]:
+                    [tags.get('rotate')]:
         try:
             if rotation is not None and float(rotation) % 360:
                 info['rotation'] = float(rotation)
                 break
         except (TypeError, ValueError):
             continue
+    # MP4 carries a per-stream duration; Matroska only has it as a DURATION tag.
+    try:
+        info['duration'] = float(stream['duration'])
+    except (KeyError, TypeError, ValueError):
+        info['duration'] = _parse_duration_tag(tags.get('duration'))
     return info
+
+
+def encode_is_full_length(file_path, source_duration):
+    """False when the encode's video is clearly shorter than the source's.
+
+    FFmpeg exits 0 unless most frames fail to decode, so a decoder that gives up part way
+    leaves a short video under full-length audio, and the container duration, which is the
+    longest stream, still looks right.  Video is compared with video.  When either length
+    is unknown the check is skipped: working it out would mean reading the whole file."""
+    if source_duration is None:
+        logging.info(f'Source video length unknown, skipping the length check: {file_path}')
+        return True
+    encoded_duration = get_video_stream(file_path)['duration']
+    if encoded_duration is None:
+        logging.info(f'Encoded video length unknown, skipping the length check: {file_path}')
+        return True
+    if encoded_duration < source_duration - max(2.0, source_duration * 0.005):
+        logging.error(f'Encoded video is {encoded_duration:.1f} s, the source video '
+                      f'{source_duration:.1f} s: {file_path}')
+        return False
+    return True
 
 
 def software_decode(codec):
@@ -928,9 +965,9 @@ def hardware_decode(source_path, video, codec):
     return list(input_args), video_filter
 
 
-def _encode_once(command, subtitle_args, output_args, source_path, dest_file_temp):
-    """Run one encode, retried without subtitles if they fail it.  True when a verified
-    encode is left at dest_file_temp; on False nothing is left there."""
+def _encode_once(command, subtitle_args, output_args, source_path, dest_file_temp, source_duration):
+    """Run one encode, retried without subtitles if they fail it.  True when a verified,
+    full-length encode is left at dest_file_temp; on False nothing is left there."""
     returncode = _run_ffmpeg(command + subtitle_args + output_args)
 
     if returncode != 0 and subtitle_args:
@@ -945,7 +982,7 @@ def _encode_once(command, subtitle_args, output_args, source_path, dest_file_tem
         if os.path.exists(dest_file_temp):
             os.remove(dest_file_temp)
         return False
-    if not verify_encoded_file(dest_file_temp):
+    if not verify_encoded_file(dest_file_temp) or not encode_is_full_length(dest_file_temp, source_duration):
         logging.error(f'File verification failed, removing temp file: {dest_file_temp}')
         os.remove(dest_file_temp)
         return False
@@ -1169,7 +1206,8 @@ def encode_video(source_path, processed_files, processing_files):
                 '-vf', video_filter
             ] + video_encoder + audio_args
 
-            if _encode_once(command, subtitle_args, output_args, source_path, dest_file_temp):
+            if _encode_once(command, subtitle_args, output_args, source_path, dest_file_temp,
+                            video['duration']):
                 os.rename(dest_file_temp, dest_file_final)
                 processed_files[dest_file_final] = True
                 logging.info(f'Encoding succeeded ({decode_path} decode): {dest_file_final}')

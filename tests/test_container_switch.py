@@ -35,7 +35,8 @@ class EncodeTestBase(unittest.TestCase):
             patch.object(monitor, 'AUDIO_BITRATE', 'auto'),
             patch.object(monitor, 'AUDIO_CHANNELS', 'auto'),
             # An unknown source codec decodes in software, the command these tests pin.
-            patch.object(monitor, 'get_video_stream', return_value={'codec': None, 'rotation': 0}),
+            patch.object(monitor, 'get_video_stream',
+                         return_value={'codec': None, 'rotation': 0, 'duration': None}),
         ]
         for p in self._patches:
             p.start()
@@ -79,8 +80,12 @@ class EncodeTestBase(unittest.TestCase):
 
     def _run_encode(self, source, codec='h264', hw='intel', hw_accel=True,
                     audio_streams=None, subtitles=None, return_code=0,
-                    source_codec=None, rotation=0, popen=None, verify=None):
+                    source_codec=None, rotation=0, source_duration=None, encoded_duration=None,
+                    popen=None, verify=None):
         processed, processing = self._managers()
+        # A list gives one encoded length per encode, in order.
+        encoded_lengths = iter(encoded_duration if isinstance(encoded_duration, list)
+                               else [encoded_duration] * 10)
         if audio_streams is None:
             audio_streams = [{'index': 1, 'codec_name': 'ac3', 'channels': 6}]
         if subtitles is None:
@@ -95,8 +100,9 @@ class EncodeTestBase(unittest.TestCase):
              patch.object(monitor, 'wait_for_file_completion', return_value=True), \
              patch.object(monitor, 'get_audio_streams', return_value=audio_streams), \
              patch.object(monitor, 'get_subtitle_streams', return_value=subtitles), \
-             patch.object(monitor, 'get_video_stream',
-                          return_value={'codec': source_codec, 'rotation': rotation}), \
+             patch.object(monitor, 'get_video_stream', side_effect=lambda p: {
+                 'codec': source_codec, 'rotation': rotation,
+                 'duration': next(encoded_lengths) if p.endswith('.tmp') else source_duration}), \
              patch.object(monitor, 'verify_encoded_file', side_effect=verify or (lambda p: True)), \
              patch('subprocess.Popen', side_effect=popen or self._fake_popen(return_code)):
             monitor.encode_video(source, processed, processing)
@@ -522,6 +528,22 @@ class TestHardwareDecode(EncodeTestBase):
         self.assertNotIn('-hwaccel', commands[1])
         self.assertTrue(os.path.exists(self.output))
 
+    def test_a_short_hardware_encode_is_encoded_again_in_software(self):
+        """A decoder that gives up part way still exits 0.  The short video must not stand."""
+        commands = self._encode(codec='h264', hw='intel', source_codec='h264',
+                                source_duration=2400.0, encoded_duration=[800.0, 2400.0])
+        self.assertEqual(len(commands), 2)
+        self.assertIn('-hwaccel', commands[0])
+        self.assertNotIn('-hwaccel', commands[1])
+        self.assertTrue(os.path.exists(self.output))
+
+    def test_a_short_software_encode_is_not_kept(self):
+        commands = self._encode(codec='h264', hw_accel=False, source_codec='h264',
+                                source_duration=2400.0, encoded_duration=800.0)
+        self.assertEqual(len(commands), 1)
+        self.assertFalse(os.path.exists(self.output))
+        self.assertFalse(os.path.exists(self.output + '.tmp'))
+
     def test_a_success_on_the_gpu_logs_which_path_it_took(self):
         with self.assertLogs(level='INFO') as logs:
             self._encode(codec='h264', hw='intel', source_codec='h264')
@@ -532,6 +554,51 @@ class TestHardwareDecode(EncodeTestBase):
         self.assertEqual(len(commands), 2)
         self.assertFalse(os.path.exists(self.output))
         self.assertFalse(os.path.exists(self.output + '.tmp'))
+
+
+class TestEncodeIsFullLength(unittest.TestCase):
+
+    def _check(self, source, encoded):
+        with patch.object(monitor, 'get_video_stream',
+                          return_value={'codec': 'h264', 'rotation': 0, 'duration': encoded}) as probe:
+            return monitor.encode_is_full_length('/out.mp4.tmp', source), probe
+
+    def test_a_short_video_fails(self):
+        self.assertFalse(self._check(2400.0, 2300.0)[0])
+        self.assertFalse(self._check(20.0, 17.5)[0])
+
+    def test_small_differences_pass(self):
+        """80 existing encodes differed from their source by at most 0.1 s."""
+        self.assertTrue(self._check(2400.0, 2400.0)[0])
+        self.assertTrue(self._check(2400.0, 2399.9)[0])
+        self.assertTrue(self._check(20.0, 18.5)[0])      # under the 2 s floor
+        self.assertTrue(self._check(7200.0, 7170.0)[0])  # under 0.5 % of a film
+        self.assertTrue(self._check(2400.0, 2410.0)[0])  # longer is never a truncation
+
+    def test_an_unknown_source_length_skips_the_check_without_probing(self):
+        ok, probe = self._check(None, 1.0)
+        self.assertTrue(ok)
+        probe.assert_not_called()
+
+    def test_an_unknown_encoded_length_skips_the_check(self):
+        self.assertTrue(self._check(2400.0, None)[0])
+
+    @unittest.skipIf(shutil.which('ffmpeg') is None or shutil.which('ffprobe') is None,
+                     'needs ffmpeg and ffprobe')
+    def test_real_files_with_short_video_under_long_audio(self):
+        """2 s of video under 20 s of audio: verify_encoded_file passes it, this does not."""
+        tmp = tempfile.mkdtemp(prefix='encoder_len_')
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        for ext in ('mp4', 'mkv'):
+            with self.subTest(container=ext):
+                short, full = os.path.join(tmp, f'short.{ext}'), os.path.join(tmp, f'full.{ext}')
+                for path, seconds in ((short, 2), (full, 20)):
+                    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
+                                    f'testsrc2=s=160x120:d={seconds}', '-f', 'lavfi', '-i', 'sine=d=20',
+                                    '-c:v', 'mpeg4', '-c:a', 'aac', path], check=True)
+                self.assertTrue(monitor.verify_encoded_file(short))
+                self.assertFalse(monitor.encode_is_full_length(short, 20.0))
+                self.assertTrue(monitor.encode_is_full_length(full, 20.0))
 
 
 class TestHwDecodeSetting(unittest.TestCase):
@@ -566,7 +633,7 @@ class TestGetVideoStream(unittest.TestCase):
         # What ffprobe 8.1 prints for an H.264 MP4 tagged with a 90 degree rotation.
         info, run = self._probe('{"streams": [{"codec_name": "h264", "tags": {}, '
                                 '"side_data_list": [{"rotation": 90}]}]}')
-        self.assertEqual(info, {'codec': 'h264', 'rotation': 90.0})
+        self.assertEqual(info, {'codec': 'h264', 'rotation': 90.0, 'duration': None})
         self.assertIn('v:0', run.call_args[0][0])
 
     def test_reads_the_legacy_rotate_tag(self):
@@ -578,12 +645,12 @@ class TestGetVideoStream(unittest.TestCase):
                        '{"streams": [{"codec_name": "hevc", "side_data_list": [{"rotation": 0}]}]}',
                        '{"streams": [{"codec_name": "hevc", "tags": {"rotate": "360"}}]}'):
             info, _ = self._probe(stdout)
-            self.assertEqual(info, {'codec': 'hevc', 'rotation': 0}, stdout)
+            self.assertEqual(info, {'codec': 'hevc', 'rotation': 0, 'duration': None}, stdout)
 
     def test_a_failed_probe_is_unknown(self):
-        self.assertEqual(self._probe('', returncode=1)[0], {'codec': None, 'rotation': 0})
+        self.assertEqual(self._probe('', returncode=1)[0], {'codec': None, 'rotation': 0, 'duration': None})
         with patch('subprocess.run', side_effect=OSError('no ffprobe')):
-            self.assertEqual(monitor.get_video_stream('/x.mkv'), {'codec': None, 'rotation': 0})
+            self.assertEqual(monitor.get_video_stream('/x.mkv'), {'codec': None, 'rotation': 0, 'duration': None})
 
     @unittest.skipIf(shutil.which('ffmpeg') is None or shutil.which('ffprobe') is None,
                      'needs ffmpeg and ffprobe')
@@ -596,8 +663,8 @@ class TestGetVideoStream(unittest.TestCase):
                         '-c:v', 'mpeg4', plain], check=True)
         subprocess.run(['ffmpeg', '-v', 'error', '-display_rotation:v:0', '90', '-i', plain,
                         '-c', 'copy', rotated], check=True)
-        self.assertEqual(monitor.get_video_stream(plain), {'codec': 'mpeg4', 'rotation': 0})
-        self.assertEqual(monitor.get_video_stream(rotated), {'codec': 'mpeg4', 'rotation': 90.0})
+        self.assertEqual(monitor.get_video_stream(plain), {'codec': 'mpeg4', 'rotation': 0, 'duration': 1.0})
+        self.assertEqual(monitor.get_video_stream(rotated), {'codec': 'mpeg4', 'rotation': 90.0, 'duration': 1.0})
 
 
 # ── Audio ───────────────────────────────────────────────────────────────────
