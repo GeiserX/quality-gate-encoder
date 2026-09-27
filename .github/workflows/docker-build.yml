@@ -30,8 +30,12 @@ jobs:
           python-version: '3.12'
       - name: Install dependencies
         run: pip install watchdog==6.0.0 pytest pytest-cov
+      - name: Install FFmpeg for the real-file tests
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Run tests
-        run: python -m pytest tests/ -v --cov --cov-report=xml
+        env:
+          REQUIRE_FFMPEG: '1'
+        run: python -m pytest tests/ -v -rs --cov --cov-report=xml
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:

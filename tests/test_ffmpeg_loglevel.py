@@ -114,6 +114,10 @@ class _Proc:
         """Stand in for the real process exit, which the encoder branches on."""
         return self._code
 
+    def poll(self):
+        """Already finished, so the stall watchdog has nothing to watch."""
+        return self._code
+
 
 @pytest.fixture
 def encode(tmp_path, monkeypatch):
@@ -134,6 +138,7 @@ def encode(tmp_path, monkeypatch):
     monkeypatch.setattr(monitor, 'get_subtitle_streams',
                         lambda *a, **k: {'copy': [], 'convert': []})
     monkeypatch.setattr(monitor, 'verify_encoded_file', lambda *a, **k: True)
+    monkeypatch.setattr(monitor, 'get_video_stream', lambda *a, **k: {'codec': None, 'reoriented': False, 'duration': None})
 
     def _run(return_code=0):
         """Drive one encode and return every command FFmpeg would have been given."""

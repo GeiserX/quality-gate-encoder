@@ -91,6 +91,7 @@ All settings are controlled via environment variables.
 | `DEST_FOLDER` | `/app/destination` | Path to the directory for encoded output |
 | `ENABLE_HW_ACCEL` | `true` | Enable hardware-accelerated encoding |
 | `HW_ENCODING_TYPE` | `nvidia` | Hardware encoder: `nvidia` or `intel` |
+| `HW_DECODE` | `true` | Decode and scale on the GPU as well as encode; `false` decodes and scales in software (see [Decoding on the GPU](#decoding-on-the-gpu)) |
 | `ENCODING_CODEC` | `hevc` | Output codec: `hevc`, `h264`, or `av1` |
 | `OUTPUT_CONTAINER` | `auto` | Container: `auto` (MP4 for H.264, MKV otherwise), `mkv`, or `mp4` |
 | `ENCODING_QUALITY` | `LOW` | Quality preset: `LOW`, `MEDIUM`, or `HIGH` |
@@ -168,6 +169,22 @@ devices:
 ```
 
 Set `HW_ENCODING_TYPE: "intel"`. Supported encoders: `hevc_qsv`, `h264_qsv`, `av1_qsv`.
+
+### Decoding on the GPU
+
+With a hardware encoder, the source is decoded and scaled to 720p on the same GPU, so the frames never pass through the CPU. Intel uses `-hwaccel qsv` with `scale_qsv`, NVIDIA uses `-hwaccel cuda` with `scale_cuda`. The encoder settings are the same as on the software path. For H.264 output the GPU converts to 8-bit 4:2:0 (`nv12`), so 10-bit sources still produce 8-bit H.264; HEVC and AV1 keep the source bit depth, as they do in software.
+
+On 1080p sources this cut the CPU time of an encode by 10 to 16 times on an Intel iGPU, and by about 40 times on an NVIDIA card.
+
+Every file still gets its encode:
+
+- A source in a codec the GPU does not decode (for example MPEG-4 Part 2, which covers Xvid and DivX, on Intel) is decoded in software from the start.
+- A source whose display matrix rotates or flips the picture (a phone video shot in portrait, say) is decoded in software too. FFmpeg does not rotate or flip GPU frames, so the encode would come out sideways or upside down.
+- If the GPU run fails, or its output fails verification, the file is encoded again straight away with software decoding and scaling. This covers profiles the card refuses, such as 10-bit H.264.
+- An FFmpeg run that has written nothing for 10 minutes is killed and counts as failed, so a GPU that stops answering falls back to software instead of holding the worker forever. Writing means the output file's size or modification time changed, so the in-place `+faststart` rewrite at the end of an MP4 counts and FFmpeg's own log lines do not. A slow encode still writes every few seconds and is never stopped, and a freeze of the whole container (`docker pause`, a suspended host) restarts the clock instead of counting as a stall.
+- Verification of a GPU run also compares the encode's video length with the source's, because FFmpeg exits 0 when a decoder gives up part way. A video more than 2 s or 0.5% short fails and falls back to software. When the source has no per-stream length (some Matroska files lack the `DURATION` tag), that check is skipped rather than read the whole file. Software output is not length-checked: a timestamp jump in an MPEG-TS recording inflates the probed length, and the check would throw away a correct encode.
+
+The log says which path each file took (`Encoding succeeded (hardware decode)` or `(software decode)`) and why a fallback happened. Set `HW_DECODE: "false"` to decode and scale in software as releases before this one did.
 
 ### Software Fallback
 

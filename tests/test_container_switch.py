@@ -4,16 +4,26 @@ The property these tests exist to protect: changing ENCODING_CODEC (and with it
 the output container) must never re-encode a library that is already encoded.
 An output on disk is done, whatever container it was written in.
 """
+import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'app'))
 
 import monitor
+
+
+# The tests that run real FFmpeg skip where it is missing.  CI sets REQUIRE_FFMPEG=1, so there
+# a missing FFmpeg fails them instead of skipping them unnoticed.
+needs_ffmpeg = unittest.skipIf(
+    not os.environ.get('REQUIRE_FFMPEG') and (shutil.which('ffmpeg') is None or shutil.which('ffprobe') is None),
+    'needs ffmpeg and ffprobe')
 
 
 class EncodeTestBase(unittest.TestCase):
@@ -33,6 +43,9 @@ class EncodeTestBase(unittest.TestCase):
             patch.object(monitor, 'AUDIO_CODEC', 'auto'),
             patch.object(monitor, 'AUDIO_BITRATE', 'auto'),
             patch.object(monitor, 'AUDIO_CHANNELS', 'auto'),
+            # An unknown source codec decodes in software, the command these tests pin.
+            patch.object(monitor, 'get_video_stream',
+                         return_value={'codec': None, 'reoriented': False, 'duration': None}),
         ]
         for p in self._patches:
             p.start()
@@ -75,8 +88,13 @@ class EncodeTestBase(unittest.TestCase):
         return _side_effect
 
     def _run_encode(self, source, codec='h264', hw='intel', hw_accel=True,
-                    audio_streams=None, subtitles=None, return_code=0):
+                    audio_streams=None, subtitles=None, return_code=0,
+                    source_codec=None, reoriented=False, source_duration=None, encoded_duration=None,
+                    popen=None, verify=None):
         processed, processing = self._managers()
+        # A list gives one encoded length per encode, in order.
+        encoded_lengths = iter(encoded_duration if isinstance(encoded_duration, list)
+                               else [encoded_duration] * 10)
         if audio_streams is None:
             audio_streams = [{'index': 1, 'codec_name': 'ac3', 'channels': 6}]
         if subtitles is None:
@@ -91,8 +109,11 @@ class EncodeTestBase(unittest.TestCase):
              patch.object(monitor, 'wait_for_file_completion', return_value=True), \
              patch.object(monitor, 'get_audio_streams', return_value=audio_streams), \
              patch.object(monitor, 'get_subtitle_streams', return_value=subtitles), \
-             patch.object(monitor, 'verify_encoded_file', return_value=True), \
-             patch('subprocess.Popen', side_effect=self._fake_popen(return_code)):
+             patch.object(monitor, 'get_video_stream', side_effect=lambda p: {
+                 'codec': source_codec, 'reoriented': reoriented,
+                 'duration': next(encoded_lengths) if p.endswith('.tmp') else source_duration}), \
+             patch.object(monitor, 'verify_encoded_file', side_effect=verify or (lambda p: True)), \
+             patch('subprocess.Popen', side_effect=popen or self._fake_popen(return_code)):
             monitor.encode_video(source, processed, processing)
         return processed
 
@@ -377,6 +398,476 @@ class TestH264CommandShape(EncodeTestBase):
         self.assertEqual(cmd[cmd.index('-f') + 1], 'matroska')
         self.assertNotIn('-movflags', cmd)
         self.assertTrue(cmd[-1].endswith('Movie - 720p.mkv.tmp'))
+
+
+# ── Decoding and scaling on the GPU ─────────────────────────────────────────
+
+class TestHardwareDecode(EncodeTestBase):
+    """With a GPU encoder, decoding and scaling run on the GPU too, and any file the
+    hardware path cannot finish is encoded again with software decoding."""
+
+    def _encode(self, **kwargs):
+        source = self._touch(self.source_dir, 'Movie.mkv')
+        self._run_encode(source, **kwargs)
+        self.output = os.path.join(self.dest_dir, 'Movie - 720p.mp4')
+        return self.ffmpeg_commands
+
+    def _fail_on_hardware_popen(self):
+        """Popen stand-in where every GPU-decoded run fails and every other one works."""
+        commands = self.ffmpeg_commands
+
+        def _side_effect(cmd, **kwargs):
+            commands.append(list(cmd))
+            proc = MagicMock()
+            proc.stdout = iter([])
+            if '-hwaccel' in cmd:
+                with open(cmd[-1], 'wb') as f:
+                    f.write(b'half written')
+                proc.wait.return_value = 1
+            else:
+                with open(cmd[-1], 'wb') as f:
+                    f.write(b'fake encoded data')
+                proc.wait.return_value = 0
+            return proc
+
+        return _side_effect
+
+    @staticmethod
+    def _input_args(cmd):
+        return cmd[:cmd.index('-i')]
+
+    @staticmethod
+    def _encoder_args(cmd):
+        start = cmd.index('-c:v')
+        return cmd[start:cmd.index('-map', start)]
+
+    def test_intel_decodes_and_scales_on_the_igpu(self):
+        commands = self._encode(codec='h264', hw='intel', source_codec='h264')
+        self.assertEqual(len(commands), 1)
+        cmd = commands[0]
+        before_input = self._input_args(cmd)
+        self.assertEqual(before_input[before_input.index('-hwaccel') + 1], 'qsv')
+        self.assertEqual(before_input[before_input.index('-hwaccel_output_format') + 1], 'qsv')
+        # nv12 is 8-bit 4:2:0: a 10-bit source still ends up as 8-bit H.264.
+        self.assertEqual(cmd[cmd.index('-vf') + 1], 'scale_qsv=w=-1:h=720:format=nv12')
+        self.assertEqual(cmd[cmd.index('-c:v') + 1], 'h264_qsv')
+        self.assertEqual(cmd[cmd.index('-global_quality') + 1], '28')
+
+    def test_intel_hevc_output_keeps_the_source_bit_depth(self):
+        """The software HEVC path forces no pixel format, so the GPU path must not either."""
+        commands = self._encode(codec='hevc', hw='intel', source_codec='hevc')
+        cmd = commands[0]
+        self.assertEqual(cmd[cmd.index('-vf') + 1], 'scale_qsv=w=-1:h=720')
+        self.assertEqual(cmd[cmd.index('-c:v') + 1], 'hevc_qsv')
+
+    def test_nvidia_decodes_and_scales_with_cuda(self):
+        commands = self._encode(codec='h264', hw='nvidia', source_codec='hevc')
+        self.assertEqual(len(commands), 1)
+        cmd = commands[0]
+        before_input = self._input_args(cmd)
+        self.assertEqual(before_input[before_input.index('-hwaccel') + 1], 'cuda')
+        self.assertEqual(before_input[before_input.index('-hwaccel_output_format') + 1], 'cuda')
+        self.assertEqual(cmd[cmd.index('-vf') + 1], 'scale_cuda=w=-1:h=720:format=nv12')
+        self.assertEqual(cmd[cmd.index('-c:v') + 1], 'h264_nvenc')
+
+    def test_a_codec_the_igpu_cannot_decode_goes_straight_to_software(self):
+        """Xvid has no decoder on an Intel iGPU, so the hardware run is not even tried."""
+        commands = self._encode(codec='h264', hw='intel', source_codec='mpeg4')
+        self.assertEqual(len(commands), 1)
+        self.assertNotIn('-hwaccel', commands[0])
+        self.assertEqual(commands[0][commands[0].index('-vf') + 1], 'scale=-1:720,format=yuv420p')
+        self.assertIn('h264_qsv', commands[0])
+
+    def test_the_same_codec_decodes_on_nvidia(self):
+        """The list is per GPU: NVDEC does decode MPEG-4 Part 2."""
+        commands = self._encode(codec='h264', hw='nvidia', source_codec='mpeg4')
+        self.assertIn('-hwaccel', self._input_args(commands[0]))
+
+    def test_a_rotated_or_flipped_source_decodes_in_software(self):
+        """FFmpeg skips the display matrix for GPU frames, so a phone video tagged 90
+        degrees would come out sideways and still pass verification."""
+        commands = self._encode(codec='h264', hw='intel', source_codec='h264', reoriented=True)
+        self.assertEqual(len(commands), 1)
+        self.assertNotIn('-hwaccel', commands[0])
+        self.assertEqual(commands[0][commands[0].index('-vf') + 1], 'scale=-1:720,format=yuv420p')
+
+    def test_an_unknown_source_codec_decodes_in_software(self):
+        commands = self._encode(codec='h264', hw='intel', source_codec=None)
+        self.assertEqual(len(commands), 1)
+        self.assertNotIn('-hwaccel', commands[0])
+
+    def test_hw_decode_false_restores_software_decoding(self):
+        with patch.object(monitor, 'HW_DECODE', False):
+            commands = self._encode(codec='h264', hw='intel', source_codec='h264')
+        self.assertEqual(len(commands), 1)
+        self.assertNotIn('-hwaccel', commands[0])
+        self.assertEqual(commands[0][commands[0].index('-vf') + 1], 'scale=-1:720,format=yuv420p')
+        self.assertIn('h264_qsv', commands[0])
+
+    def test_software_encoding_never_decodes_on_a_gpu(self):
+        commands = self._encode(codec='h264', hw_accel=False, source_codec='h264')
+        self.assertEqual(len(commands), 1)
+        self.assertNotIn('-hwaccel', commands[0])
+        self.assertIn('libx264', commands[0])
+
+    def test_a_failed_hardware_run_is_encoded_again_in_software(self):
+        """A GPU that refuses the source must never leave it without its 720p copy."""
+        with self.assertLogs(level='WARNING') as logs:
+            commands = self._encode(codec='h264', hw='intel', source_codec='h264',
+                                    popen=self._fail_on_hardware_popen())
+        self.assertEqual(len(commands), 2)
+        self.assertIn('-hwaccel', commands[0])
+        self.assertNotIn('-hwaccel', commands[1])
+        self.assertEqual(commands[1][commands[1].index('-vf') + 1], 'scale=-1:720,format=yuv420p')
+        self.assertEqual(self._encoder_args(commands[0]), self._encoder_args(commands[1]))
+        self.assertEqual(open(self.output, 'rb').read(), b'fake encoded data')
+        self.assertTrue(any('Hardware decode failed' in line for line in logs.output), logs.output)
+
+    def test_a_hardware_encode_that_fails_verification_is_encoded_again_in_software(self):
+        """Exit 0 is not enough: an output that fails verification falls back too."""
+        verdicts = iter([False, True])
+        commands = self._encode(codec='h264', hw='intel', source_codec='h264',
+                                verify=lambda p: next(verdicts))
+        self.assertEqual(len(commands), 2)
+        self.assertIn('-hwaccel', commands[0])
+        self.assertNotIn('-hwaccel', commands[1])
+        self.assertTrue(os.path.exists(self.output))
+
+    def test_a_short_hardware_encode_is_encoded_again_in_software(self):
+        """A decoder that gives up part way still exits 0.  The short video must not stand."""
+        commands = self._encode(codec='h264', hw='intel', source_codec='h264',
+                                source_duration=2400.0, encoded_duration=[800.0, 2400.0])
+        self.assertEqual(len(commands), 2)
+        self.assertIn('-hwaccel', commands[0])
+        self.assertNotIn('-hwaccel', commands[1])
+        self.assertTrue(os.path.exists(self.output))
+
+    def test_a_software_encode_is_kept_whatever_its_probed_length(self):
+        """A timestamp jump in an MPEG-TS recording inflates the probed source length, so
+        software output is accepted on verification alone, as it always was."""
+        commands = self._encode(codec='h264', hw_accel=False, source_codec='h264',
+                                source_duration=5030.0, encoded_duration=90.0)
+        self.assertEqual(len(commands), 1)
+        self.assertTrue(os.path.exists(self.output))
+
+    def test_a_ts_source_that_fails_the_gpu_length_check_still_gets_its_encode(self):
+        commands = self._encode(codec='h264', hw='intel', source_codec='h264',
+                                source_duration=5030.0, encoded_duration=[90.0, 90.0])
+        self.assertEqual(len(commands), 2)
+        self.assertNotIn('-hwaccel', commands[1])
+        self.assertTrue(os.path.exists(self.output))
+
+    def test_a_success_on_the_gpu_logs_which_path_it_took(self):
+        with self.assertLogs(level='INFO') as logs:
+            self._encode(codec='h264', hw='intel', source_codec='h264')
+        self.assertTrue(any('Encoding succeeded (hardware decode)' in line for line in logs.output), logs.output)
+
+    def test_a_failed_hardware_run_goes_straight_to_software_with_subtitles(self):
+        """No GPU retry without subtitles: software runs next and keeps its own retry."""
+        commands = self.ffmpeg_commands
+
+        def _popen(cmd, **kwargs):
+            commands.append(list(cmd))
+            proc = MagicMock()
+            proc.stdout = iter([])
+            failed = '-hwaccel' in cmd or '-c:s:0' in cmd
+            with open(cmd[-1], 'wb') as f:
+                f.write(b'half written' if failed else b'fake encoded data')
+            proc.wait.return_value = 1 if failed else 0
+            return proc
+
+        self._encode(codec='h264', hw='intel', source_codec='h264', popen=_popen,
+                     subtitles={'copy': [], 'convert': [(2, 'subrip')]})
+        self.assertEqual([('-hwaccel' in c, '-sn' in c) for c in commands],
+                         [(True, False), (False, False), (False, True)])
+        self.assertEqual(open(self.output, 'rb').read(), b'fake encoded data')
+
+    def test_when_both_paths_fail_nothing_is_left_behind(self):
+        commands = self._encode(codec='h264', hw='intel', source_codec='h264', return_code=1)
+        self.assertEqual(len(commands), 2)
+        self.assertFalse(os.path.exists(self.output))
+        self.assertFalse(os.path.exists(self.output + '.tmp'))
+
+
+class TestEncodeIsFullLength(unittest.TestCase):
+
+    def _check(self, source, encoded):
+        with patch.object(monitor, 'get_video_stream',
+                          return_value={'codec': 'h264', 'reoriented': False, 'duration': encoded}) as probe:
+            return monitor.encode_is_full_length('/out.mp4.tmp', source), probe
+
+    def test_a_short_video_fails(self):
+        self.assertFalse(self._check(2400.0, 2300.0)[0])
+        self.assertFalse(self._check(20.0, 17.5)[0])
+
+    def test_small_differences_pass(self):
+        """80 existing encodes differed from their source by at most 0.1 s."""
+        self.assertTrue(self._check(2400.0, 2400.0)[0])
+        self.assertTrue(self._check(2400.0, 2399.9)[0])
+        self.assertTrue(self._check(20.0, 18.5)[0])      # under the 2 s floor
+        self.assertTrue(self._check(7200.0, 7170.0)[0])  # under 0.5 % of a film
+        self.assertTrue(self._check(2400.0, 2410.0)[0])  # longer is never a truncation
+
+    def test_an_unknown_source_length_skips_the_check_without_probing(self):
+        ok, probe = self._check(None, 1.0)
+        self.assertTrue(ok)
+        probe.assert_not_called()
+
+    def test_an_unknown_encoded_length_skips_the_check(self):
+        self.assertTrue(self._check(2400.0, None)[0])
+
+    @needs_ffmpeg
+    def test_real_files_with_short_video_under_long_audio(self):
+        """2 s of video under 20 s of audio: verify_encoded_file passes it, this does not."""
+        tmp = tempfile.mkdtemp(prefix='encoder_len_')
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        for ext in ('mp4', 'mkv'):
+            with self.subTest(container=ext):
+                short, full = os.path.join(tmp, f'short.{ext}'), os.path.join(tmp, f'full.{ext}')
+                for path, seconds in ((short, 2), (full, 20)):
+                    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
+                                    f'testsrc2=s=160x120:d={seconds}', '-f', 'lavfi', '-i', 'sine=d=20',
+                                    '-c:v', 'mpeg4', '-c:a', 'aac', path], check=True)
+                self.assertTrue(monitor.verify_encoded_file(short))
+                self.assertFalse(monitor.encode_is_full_length(short, 20.0))
+                self.assertTrue(monitor.encode_is_full_length(full, 20.0))
+
+
+class TestStallWatchdog(unittest.TestCase):
+    """A hung FFmpeg is killed so the software path can run; a slow one is left alone.
+    Real child processes stand in for FFmpeg, since _run_ffmpeg only reads command[-1]."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='encoder_stall_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.output = os.path.join(self.tmp, 'Movie - 720p.mp4.tmp')
+        for p in (patch.object(monitor, 'FFMPEG_STALL_SECONDS', 0.5),
+                  patch.object(monitor, 'STALL_CHECK_SECONDS', 0.05)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _run(self, script):
+        start = time.monotonic()
+        code = monitor._run_ffmpeg([sys.executable, '-c', script, self.output])
+        return code, time.monotonic() - start
+
+    def test_a_run_that_stops_writing_is_killed(self):
+        with self.assertLogs(level='ERROR') as logs:
+            code, elapsed = self._run('import sys, time\n'
+                                      'open(sys.argv[1], "wb").write(b"header")\n'
+                                      'time.sleep(60)')
+        self.assertNotEqual(code, 0)
+        self.assertLess(elapsed, 20)
+        self.assertTrue(any('wrote nothing' in line for line in logs.output), logs.output)
+
+    def test_a_run_that_never_creates_its_output_is_killed(self):
+        code, elapsed = self._run('import time; time.sleep(60)')
+        self.assertNotEqual(code, 0)
+        self.assertLess(elapsed, 20)
+
+    def test_log_output_alone_is_not_progress(self):
+        """FFmpeg keeps redrawing its stats line while stalled; only the output file counts."""
+        code, elapsed = self._run('import sys, time\n'
+                                  'open(sys.argv[1], "wb").write(b"header")\n'
+                                  'for _ in range(600):\n'
+                                  '    print("frame= 1 fps=0.0 time=00:00:00.04 speed=0x", flush=True)\n'
+                                  '    time.sleep(0.05)')
+        self.assertNotEqual(code, 0)
+        self.assertLess(elapsed, 20)
+
+    def test_a_slow_run_that_keeps_writing_is_left_alone(self):
+        """Over twice the stall limit in total, but never a pause as long as the limit.
+        The limit is 2 s here so a child interpreter that is slow to start is not a stall."""
+        with patch.object(monitor, 'FFMPEG_STALL_SECONDS', 2.0):
+            code, elapsed = self._run('import sys, time\n'
+                                      'for _ in range(25):\n'
+                                      '    with open(sys.argv[1], "ab") as f: f.write(b"x")\n'
+                                      '    time.sleep(0.2)')
+        self.assertEqual(code, 0)
+        self.assertGreater(elapsed, 5.0)
+
+
+class _FakeClock:
+    """Stands in for the time module inside the watchdog, so a freeze can be scripted."""
+
+    def __init__(self, steps):
+        self.now = 1000.0
+        self.steps = list(steps)
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += self.steps.pop(0) if self.steps else seconds
+
+
+class _FakeProcess:
+    """Runs for `checks` watchdog checks, calling `on_poll` at each one."""
+
+    def __init__(self, checks, on_poll=None):
+        self.checks, self.on_poll, self.killed = checks, on_poll, False
+
+    def poll(self):
+        if self.killed or self.checks == 0:
+            return 0
+        self.checks -= 1
+        if self.on_poll:
+            self.on_poll()
+        return None
+
+    def kill(self):
+        self.killed = True
+
+
+class TestStallWatchdogClock(unittest.TestCase):
+    """The watchdog's decisions, on a scripted clock: stall limit 10 s, a check every 1 s."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='encoder_stall_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.output = os.path.join(self.tmp, 'Movie - 720p.mp4.tmp')
+        with open(self.output, 'wb') as f:
+            f.write(b'moov and mdat')
+        for p in (patch.object(monitor, 'FFMPEG_STALL_SECONDS', 10),
+                  patch.object(monitor, 'STALL_CHECK_SECONDS', 1)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _watch(self, process, steps=()):
+        with patch.object(monitor, 'time', _FakeClock(steps)):
+            monitor._kill_if_stalled(process, self.output)
+        return process.killed
+
+    def test_a_silent_run_is_killed(self):
+        self.assertTrue(self._watch(_FakeProcess(checks=30)))
+
+    def test_a_rewrite_that_keeps_the_size_is_progress(self):
+        """+faststart moves data inside the file: same size, new mtime at every write."""
+        mtime = [1_000_000_000]
+
+        def rewrite_in_place():
+            mtime[0] += 1_000_000
+            os.utime(self.output, ns=(mtime[0], mtime[0]))
+
+        self.assertFalse(self._watch(_FakeProcess(checks=30, on_poll=rewrite_in_place)))
+
+    def test_a_freeze_restarts_the_clock_instead_of_killing(self):
+        """docker pause or SIGSTOP: one check arrives 100 s late, then 5 quiet seconds."""
+        self.assertFalse(self._watch(_FakeProcess(checks=8), steps=[1, 1, 100, 1, 1, 1, 1, 1]))
+
+    def test_a_stall_after_a_freeze_is_still_killed(self):
+        self.assertTrue(self._watch(_FakeProcess(checks=30), steps=[1, 100]))
+
+
+class TestHwDecodeSetting(unittest.TestCase):
+    """HW_DECODE is read once, at import, so only a fresh import proves its name and default."""
+
+    def _hw_decode_from_environment(self, value):
+        app_dir = os.path.join(os.path.dirname(__file__), '..', 'app')
+        env = dict(os.environ)
+        env.pop('HW_DECODE', None)
+        if value is not None:
+            env['HW_DECODE'] = value
+        result = subprocess.run(
+            [sys.executable, '-c', 'import monitor; print("HW_DECODE=" + str(monitor.HW_DECODE))'],
+            cwd=app_dir, env=env, capture_output=True, text=True, timeout=120)
+        return result.stdout.strip().splitlines()[-1]
+
+    def test_on_by_default(self):
+        self.assertEqual(self._hw_decode_from_environment(None), 'HW_DECODE=True')
+
+    def test_false_turns_it_off(self):
+        self.assertEqual(self._hw_decode_from_environment('false'), 'HW_DECODE=False')
+
+
+def _matrix(*rows):
+    """ffprobe's displaymatrix dump for three rows of three numbers."""
+    return ''.join(f'\n{i:08x}: {row[0]:12d}' + ''.join(f' {v:11d}' for v in row[1:])
+                   for i, row in enumerate(rows)) + '\n'
+
+
+# What ffprobe prints for the display matrices FFmpeg writes with -display_rotation and
+# -display_vflip.  It reports 270 degrees as -90 and 180 as -180, and a flip as 0.
+IDENTITY = _matrix((65536, 0, 0), (0, 65536, 0), (0, 0, 1073741824))
+ROTATE_90 = _matrix((0, -65536, 0), (65536, 0, 0), (0, 0, 1073741824))
+ROTATE_270 = _matrix((0, 65536, 0), (-65536, 0, 0), (0, 0, 1073741824))
+ROTATE_180 = _matrix((-65536, 0, 0), (0, -65536, 0), (0, 0, 1073741824))
+VFLIP = _matrix((65536, 0, 0), (0, -65536, 0), (0, 0, 1073741824))
+
+
+class TestGetVideoStream(unittest.TestCase):
+
+    def _probe(self, stdout, returncode=0):
+        with patch('subprocess.run', return_value=MagicMock(returncode=returncode, stdout=stdout)) as run:
+            info = monitor.get_video_stream('/x.mkv')
+        return info, run
+
+    def _side_data(self, **side_data):
+        return self._probe(json.dumps({'streams': [{'codec_name': 'h264', 'side_data_list': [side_data]}]}))[0]
+
+    def test_reads_the_codec_and_asks_for_the_matrix(self):
+        info, run = self._probe('{"streams": [{"codec_name": "h264"}]}')
+        self.assertEqual(info, {'codec': 'h264', 'reoriented': False, 'duration': None})
+        cmd = run.call_args[0][0]
+        self.assertIn('v:0', cmd)
+        self.assertIn('displaymatrix', cmd[cmd.index('-show_entries') + 1])
+
+    def test_every_rotation_matrix_is_reoriented(self):
+        for matrix, rotation in ((ROTATE_90, 90), (ROTATE_270, -90), (ROTATE_180, -180)):
+            with self.subTest(rotation=rotation):
+                self.assertTrue(self._side_data(displaymatrix=matrix, rotation=rotation)['reoriented'])
+
+    def test_a_flip_is_reoriented_although_its_rotation_is_zero(self):
+        self.assertTrue(self._side_data(displaymatrix=VFLIP, rotation=0)['reoriented'])
+
+    def test_an_identity_matrix_is_upright(self):
+        self.assertFalse(self._side_data(displaymatrix=IDENTITY, rotation=0)['reoriented'])
+
+    def test_an_unreadable_matrix_counts_as_reoriented(self):
+        self.assertTrue(self._side_data(displaymatrix='garbled', rotation=0)['reoriented'])
+
+    def test_a_rotation_without_a_matrix_dump(self):
+        """Negative angles, as ffprobe prints them, and whole turns."""
+        for rotation, expected in ((-90, True), (-180, True), (90, True), (0, False), (360, False), (-360, False)):
+            with self.subTest(rotation=rotation):
+                self.assertEqual(self._side_data(rotation=rotation)['reoriented'], expected)
+
+    def test_the_legacy_rotate_tag(self):
+        for tag, expected in (('90', True), ('-90', True), ('-180', True), ('0', False), ('360', False), ('junk', False)):
+            with self.subTest(tag=tag):
+                info, _ = self._probe(json.dumps({'streams': [{'codec_name': 'h264', 'tags': {'rotate': tag}}]}))
+                self.assertEqual(info['reoriented'], expected)
+
+    def test_a_failed_probe_is_unknown(self):
+        self.assertEqual(self._probe('', returncode=1)[0], {'codec': None, 'reoriented': False, 'duration': None})
+        with patch('subprocess.run', side_effect=OSError('no ffprobe')):
+            self.assertEqual(monitor.get_video_stream('/x.mkv'), {'codec': None, 'reoriented': False, 'duration': None})
+
+    def test_parse_duration_tag(self):
+        self.assertEqual(monitor._parse_duration_tag('00:43:12.345000000'), 2592.345)
+        self.assertEqual(monitor._parse_duration_tag('02:00:00.000000000'), 7200.0)
+        for bad in (None, '', '43:12', 'N/A', '00:xx:12.0'):
+            with self.subTest(value=bad):
+                self.assertIsNone(monitor._parse_duration_tag(bad))
+
+    @needs_ffmpeg
+    def test_real_files(self):
+        """The same probe against files FFmpeg itself tagged, not hand-written replies."""
+        tmp = tempfile.mkdtemp(prefix='encoder_rot_')
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        plain = os.path.join(tmp, 'plain.mp4')
+        subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=320x240:d=1',
+                        '-c:v', 'mpeg4', plain], check=True)
+        self.assertEqual(monitor.get_video_stream(plain), {'codec': 'mpeg4', 'reoriented': False, 'duration': 1.0})
+        for name, option in (('rotate90', ['-display_rotation:v:0', '90']),
+                             ('rotate270', ['-display_rotation:v:0', '270']),
+                             ('rotate180', ['-display_rotation:v:0', '180']),
+                             ('vflip', ['-display_vflip:v:0'])):
+            with self.subTest(name=name):
+                path = os.path.join(tmp, f'{name}.mp4')
+                subprocess.run(['ffmpeg', '-v', 'error'] + option + ['-i', plain, '-c', 'copy', path], check=True)
+                self.assertEqual(monitor.get_video_stream(path),
+                                 {'codec': 'mpeg4', 'reoriented': True, 'duration': 1.0})
 
 
 # ── Audio ───────────────────────────────────────────────────────────────────

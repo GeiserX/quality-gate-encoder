@@ -23,6 +23,8 @@ import datetime
 # Env variables
 ENABLE_HW_ACCEL = os.getenv('ENABLE_HW_ACCEL', 'true').lower() == 'true'
 HW_ENCODING_TYPE = os.getenv('HW_ENCODING_TYPE', 'nvidia').lower()  # nvidia, intel
+# Decode and scale on the GPU as well, not just encode.  'false' decodes and scales in software.
+HW_DECODE = os.getenv('HW_DECODE', 'true').lower() == 'true'
 ENCODING_QUALITY = os.getenv('ENCODING_QUALITY', 'LOW').upper()  # LOW, MEDIUM, HIGH
 ENCODING_CODEC = os.getenv('ENCODING_CODEC', 'hevc').lower()  # hevc, h264 or av1
 OUTPUT_CONTAINER = os.getenv('OUTPUT_CONTAINER', 'auto').lower()  # auto, mkv, mp4
@@ -492,7 +494,7 @@ FFMPEG_LOGLEVEL = _parse_ffmpeg_loglevel(os.getenv('FFMPEG_LOGLEVEL', 'warning')
 
 logging.info(f'Config: SOURCE_FOLDER={SOURCE_FOLDER}, DEST_FOLDER={DEST_FOLDER}, '
              f'CODEC={resolve_codec()}, CONTAINER={resolve_container()}, QUALITY={ENCODING_QUALITY}, '
-             f'HW={HW_ENCODING_TYPE if ENABLE_HW_ACCEL else "disabled"}, '
+             f'HW={HW_ENCODING_TYPE if ENABLE_HW_ACCEL else "disabled"}, HW_DECODE={HW_DECODE}, '
              f'AUDIO={AUDIO_CODEC}/{AUDIO_BITRATE}/{AUDIO_CHANNELS}ch, '
              f'MANIFEST_TARGET={SYMLINK_MANIFEST_TARGET or "disabled"}, '
              f'SKIP_IF_LOW_QUALITY_EXISTS={SKIP_IF_LOW_QUALITY_EXISTS}, '
@@ -845,14 +847,216 @@ def resolve_audio_bitrate(channels):
     return '384k' if channels > 2 else '192k'
 
 
+# An encode whose output file has not grown for this long is hung, most often a GPU that
+# stopped answering.  A slow software encode still writes every few seconds.
+FFMPEG_STALL_SECONDS = 600
+STALL_CHECK_SECONDS = 30
+
+
+def _write_progress(output_path):
+    """A value that changes whenever FFmpeg writes to its output: the file's size and mtime.
+    The +faststart rewrite moves data inside the MP4 without changing its size, but every
+    write moves the mtime.  Bytes written anywhere else do not count: FFmpeg redraws its
+    stats line twice a second even while stalled."""
+    try:
+        stat = os.stat(output_path)
+        return stat.st_size, stat.st_mtime_ns
+    except OSError:
+        return None, None
+
+
+def _kill_if_stalled(process, output_path):
+    """Kill FFmpeg once it has written nothing for FFMPEG_STALL_SECONDS.
+
+    A check that comes far later than scheduled means everything was frozen (docker pause,
+    SIGSTOP, a suspended host), which says nothing about FFmpeg, so the clock restarts."""
+    last_progress, last_change = None, time.monotonic()
+    last_check = last_change
+    while process.poll() is None:
+        time.sleep(STALL_CHECK_SECONDS)
+        now = time.monotonic()
+        progress = _write_progress(output_path)
+        if progress != last_progress or now - last_check > 3 * STALL_CHECK_SECONDS:
+            last_progress, last_change = progress, now
+        elif now - last_change >= FFMPEG_STALL_SECONDS:
+            logging.error(f'FFmpeg wrote nothing for {FFMPEG_STALL_SECONDS:g} s, stopping it: {output_path}')
+            process.kill()
+            return
+        last_check = now
+
+
 def _run_ffmpeg(command):
-    """Run an FFmpeg command, streaming its output to the log.  Returns the exit code."""
+    """Run an FFmpeg command, streaming its output to the log.  Returns the exit code,
+    which is non-zero when a stalled run had to be killed."""
     logging.info(f'FFmpeg command: {" ".join(command)}')
     process = subprocess.Popen(command, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True)
+    threading.Thread(target=_kill_if_stalled, args=(process, command[-1]), daemon=True).start()
     for line in process.stdout:
         logging.info(line.strip())
     return process.wait()
+
+
+# Source codecs each GPU decodes, so decoding and scaling can stay on the card.  A source in
+# any other codec, such as Xvid on an Intel iGPU, is decoded in software from the start.  A
+# profile the card still refuses (10-bit H.264, for one) fails at once and falls back.
+HW_DECODE_CODECS = {
+    'intel': {'h264', 'hevc', 'av1', 'vp9', 'mpeg2video', 'vc1'},
+    'nvidia': {'h264', 'hevc', 'av1', 'vp9', 'vp8', 'mpeg1video', 'mpeg2video', 'mpeg4', 'vc1'},
+}
+HW_DECODE_ARGS = {
+    'intel': (['-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv'], 'scale_qsv'),
+    'nvidia': (['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'], 'scale_cuda'),
+}
+
+
+def _parse_duration_tag(value):
+    """Seconds from a Matroska DURATION tag such as '00:43:12.345000000', or None."""
+    try:
+        hours, minutes, seconds = value.split(':')
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    except (AttributeError, ValueError):
+        return None
+
+
+# ffprobe's dump of an identity display matrix: nothing to rotate or flip.
+IDENTITY_DISPLAY_MATRIX = [65536, 0, 0, 0, 65536, 0, 0, 0, 1073741824]
+
+
+def _display_matrix(dump):
+    """The numbers in ffprobe's displaymatrix dump, or None when it cannot be read."""
+    try:
+        return [int(v) for line in dump.strip().splitlines() for v in line.split(':', 1)[1].split()]
+    except (AttributeError, IndexError, ValueError):
+        return None
+
+
+def _is_rotated(degrees):
+    try:
+        return degrees is not None and float(degrees) % 360 != 0
+    except (TypeError, ValueError):
+        return False
+
+
+def get_video_stream(filepath):
+    """Codec, orientation and duration (seconds) of the first video stream.  The codec and
+    duration are None when ffprobe cannot tell.  `reoriented` is True when the stream asks
+    to be rotated or flipped on display."""
+    info = {'codec': None, 'reoriented': False, 'duration': None}
+    try:
+        cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+               '-show_entries', 'stream=codec_name,duration:stream_tags=rotate,DURATION'
+               ':stream_side_data=rotation,displaymatrix', '-of', 'json', filepath]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        stream = (json.loads(result.stdout).get('streams') or [{}])[0] if result.returncode == 0 else {}
+    except Exception as e:
+        logging.debug(f'ffprobe video stream check failed for {filepath}: {e}')
+        return info
+    info['codec'] = stream.get('codec_name')
+    tags = {key.lower(): value for key, value in (stream.get('tags') or {}).items()}
+    # Any display matrix but the identity counts, not only a rotation: a vertical flip
+    # reports rotation 0.  A matrix that cannot be read counts too.  Then the legacy
+    # "rotate" tag older muxers wrote.
+    for side_data in stream.get('side_data_list') or []:
+        if 'displaymatrix' in side_data:
+            if _display_matrix(side_data['displaymatrix']) != IDENTITY_DISPLAY_MATRIX:
+                info['reoriented'] = True
+        elif _is_rotated(side_data.get('rotation')):
+            info['reoriented'] = True
+    if _is_rotated(tags.get('rotate')):
+        info['reoriented'] = True
+    # MP4 carries a per-stream duration; Matroska only has it as a DURATION tag.
+    try:
+        info['duration'] = float(stream['duration'])
+    except (KeyError, TypeError, ValueError):
+        info['duration'] = _parse_duration_tag(tags.get('duration'))
+    return info
+
+
+def encode_is_full_length(file_path, source_duration):
+    """False when the encode's video is clearly shorter than the source's.
+
+    FFmpeg exits 0 unless most frames fail to decode, so a decoder that gives up part way
+    leaves a short video under full-length audio, and the container duration, which is the
+    longest stream, still looks right.  Video is compared with video.  When either length
+    is unknown the check is skipped: working it out would mean reading the whole file."""
+    if source_duration is None:
+        logging.info(f'Source video length unknown, skipping the length check: {file_path}')
+        return True
+    encoded_duration = get_video_stream(file_path)['duration']
+    if encoded_duration is None:
+        logging.info(f'Encoded video length unknown, skipping the length check: {file_path}')
+        return True
+    if encoded_duration < source_duration - max(2.0, source_duration * 0.005):
+        logging.error(f'Encoded video is {encoded_duration:.1f} s, the source video '
+                      f'{source_duration:.1f} s: {file_path}')
+        return False
+    return True
+
+
+def software_decode(codec):
+    """Input options and video filter for decoding and scaling on the CPU."""
+    video_filter = 'scale=-1:720'
+    if codec == 'h264':
+        # 8-bit 4:2:0 is the only pixel format the hardware H.264 encoders
+        # accept, and the only one every H.264 decoder can play.
+        video_filter += ',format=yuv420p'
+    return [], video_filter
+
+
+def hardware_decode(source_path, video, codec):
+    """Input options and video filter that keep decoding and scaling on the GPU, or None
+    when this source is decoded in software.  `video` is get_video_stream() of the source."""
+    if not HW_DECODE or HW_ENCODING_TYPE not in HW_DECODE_ARGS:
+        return None
+    if video['codec'] not in HW_DECODE_CODECS[HW_ENCODING_TYPE]:
+        logging.info(f'Software decode: the {HW_ENCODING_TYPE} GPU does not decode '
+                     f'{video["codec"] or "an unknown codec"}: {source_path}')
+        return None
+    if video['reoriented']:
+        # FFmpeg does not rotate or flip GPU frames, and says nothing: the encode comes out
+        # sideways or upside down with exit 0.
+        logging.info(f'Software decode: the source has a display rotation or flip, '
+                     f'which FFmpeg only applies in software: {source_path}')
+        return None
+    input_args, scale_filter = HW_DECODE_ARGS[HW_ENCODING_TYPE]
+    video_filter = f'{scale_filter}=w=-1:h=720'
+    if codec == 'h264':
+        video_filter += ':format=nv12'  # 8-bit 4:2:0, as on the software path
+    return list(input_args), video_filter
+
+
+def _encode_once(command, subtitle_args, output_args, source_path, dest_file_temp, source_duration,
+                 gpu_run):
+    """Run one encode.  True when a verified encode is left at dest_file_temp; on False
+    nothing is left there.
+
+    A software run is retried without subtitles if they fail it, and is accepted on
+    verify_encoded_file alone.  A GPU run gets no subtitle retry, since software runs next
+    and has its own, and its video must also be as long as the source's.  The length check
+    stays off the software path because a timestamp jump in an MPEG-TS recording inflates
+    the probed source length, and there it would throw away the only good encode."""
+    returncode = _run_ffmpeg(command + subtitle_args + output_args)
+
+    if returncode != 0 and subtitle_args and not gpu_run:
+        # A subtitle stream must never cost us the encode.
+        logging.warning(f'FFmpeg failed with subtitles mapped (exit {returncode}), retrying without them: {source_path}')
+        if os.path.exists(dest_file_temp):
+            os.remove(dest_file_temp)
+        returncode = _run_ffmpeg(command + ['-sn'] + output_args)
+
+    if returncode != 0:
+        logging.error(f'FFmpeg encoding failed (exit {returncode}) for file: {source_path}')
+        if os.path.exists(dest_file_temp):
+            os.remove(dest_file_temp)
+        return False
+    if not verify_encoded_file(dest_file_temp) or \
+            (gpu_run and not encode_is_full_length(dest_file_temp, source_duration)):
+        logging.error(f'File verification failed, removing temp file: {dest_file_temp}')
+        os.remove(dest_file_temp)
+        return False
+    return True
+
 
 def encode_video(source_path, processed_files, processing_files):
     if processing_files.get(source_path):
@@ -1017,30 +1221,16 @@ def encode_video(source_path, processed_files, processing_files):
             logging.error(f'No audio streams found in file: {source_path}')
             return
 
-        video_filter = 'scale=-1:720'
-        if codec == 'h264':
-            # 8-bit 4:2:0 is the only pixel format the hardware H.264 encoders
-            # accept, and the only one every H.264 decoder can play.
-            video_filter += ',format=yuv420p'
-
-        # Build the FFmpeg command
-        command = [
-            'ffmpeg', '-loglevel', FFMPEG_LOGLEVEL, '-y',
-            '-analyzeduration', '100M', '-probesize', '100M',
-            '-i', source_path,
-            '-map', '0:v:0',
-            '-vf', video_filter
-        ] + video_encoder
-
         # Process each audio stream
+        audio_args = []
         audio_codec = resolve_audio_codec(container)
         for idx, stream in enumerate(audio_streams):
             channels = resolve_audio_channels(stream, audio_codec)
             # Map the audio stream
-            command.extend(['-map', f'0:a:{idx}'])
-            command.extend([f'-c:a:{idx}', audio_codec,
-                            f'-b:a:{idx}', resolve_audio_bitrate(channels),
-                            f'-ac:a:{idx}', str(channels)])
+            audio_args.extend(['-map', f'0:a:{idx}'])
+            audio_args.extend([f'-c:a:{idx}', audio_codec,
+                               f'-b:a:{idx}', resolve_audio_bitrate(channels),
+                               f'-ac:a:{idx}', str(channels)])
 
         # Map subtitles with codec handling for the target container
         subtitle_streams = get_subtitle_streams(source_path, container)
@@ -1068,31 +1258,35 @@ def encode_video(source_path, processed_files, processing_files):
             output_args.extend(['-movflags', '+faststart'])
         output_args.append(dest_file_temp)
 
-        returncode = _run_ffmpeg(command + subtitle_args + output_args)
+        # The GPU path goes first when there is one.  Software decoding always follows it,
+        # so a source the card cannot handle still gets its encode.
+        decoders = []
+        video = get_video_stream(source_path)
+        gpu_decode = hardware_decode(source_path, video, codec) if hw_enc_supported else None
+        if gpu_decode:
+            decoders.append(('hardware', gpu_decode))
+        decoders.append(('software', software_decode(codec)))
 
-        if returncode != 0 and subtitle_args:
-            # A subtitle stream must never cost us the encode.
-            logging.warning(f'FFmpeg failed with subtitles mapped (exit {returncode}), retrying without them: {source_path}')
-            if os.path.exists(dest_file_temp):
-                os.remove(dest_file_temp)
-            returncode = _run_ffmpeg(command + ['-sn'] + output_args)
+        for decode_path, (input_args, video_filter) in decoders:
+            command = ['ffmpeg', '-loglevel', FFMPEG_LOGLEVEL, '-y'] + input_args + [
+                '-analyzeduration', '100M', '-probesize', '100M',
+                '-i', source_path,
+                '-map', '0:v:0',
+                '-vf', video_filter
+            ] + video_encoder + audio_args
 
-        if returncode == 0:
-            if verify_encoded_file(dest_file_temp):
+            if _encode_once(command, subtitle_args, output_args, source_path, dest_file_temp,
+                            video['duration'], gpu_run=decode_path == 'hardware'):
                 os.rename(dest_file_temp, dest_file_final)
                 processed_files[dest_file_final] = True
-                logging.info(f'Encoding succeeded: {dest_file_final}')
-                
+                logging.info(f'Encoding succeeded ({decode_path} decode): {dest_file_final}')
+
                 # Create version symlink for Jellyfin multi-version support
                 create_version_symlink(source_path, dest_file_final)
                 _manifest_add(os.path.relpath(dest_file_final, DEST_FOLDER))
-            else:
-                logging.error(f'File verification failed, removing temp file: {dest_file_temp}')
-                os.remove(dest_file_temp)
-        else:
-            logging.error(f'FFmpeg encoding failed (exit {returncode}) for file: {source_path}')
-            if os.path.exists(dest_file_temp):
-                os.remove(dest_file_temp)
+                break
+            if decode_path == 'hardware':
+                logging.warning(f'Hardware decode failed, retrying with software decode and scaling: {source_path}')
     finally:
         processing_files.pop(source_path, None)
 
