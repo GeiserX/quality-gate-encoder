@@ -182,7 +182,7 @@ Every file still gets its encode:
 - A source with a display rotation (a phone video shot in portrait, say) is decoded in software too. FFmpeg does not rotate GPU frames, so the encode would come out sideways.
 - If the GPU run fails, or its output fails verification, the file is encoded again straight away with software decoding and scaling. This covers profiles the card refuses, such as 10-bit H.264.
 - An FFmpeg run whose output file has not grown for 10 minutes is killed and counts as failed, so a GPU that stops answering falls back to software instead of holding the worker forever. A slow encode still writes every few seconds and is never stopped.
-- Verification on both paths also compares the encode's video length with the source's, because FFmpeg exits 0 when a decoder gives up part way. A video more than 2 s or 0.5% short fails. When the source has no per-stream length (some Matroska files lack the `DURATION` tag), that check is skipped rather than read the whole file.
+- Verification of a GPU run also compares the encode's video length with the source's, because FFmpeg exits 0 when a decoder gives up part way. A video more than 2 s or 0.5% short fails and falls back to software. When the source has no per-stream length (some Matroska files lack the `DURATION` tag), that check is skipped rather than read the whole file. Software output is not length-checked: a timestamp jump in an MPEG-TS recording inflates the probed length, and the check would throw away a correct encode.
 
 The log says which path each file took (`Encoding succeeded (hardware decode)` or `(software decode)`) and why a fallback happened. Set `HW_DECODE: "false"` to decode and scale in software as releases before this one did.
 

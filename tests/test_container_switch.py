@@ -538,12 +538,20 @@ class TestHardwareDecode(EncodeTestBase):
         self.assertNotIn('-hwaccel', commands[1])
         self.assertTrue(os.path.exists(self.output))
 
-    def test_a_short_software_encode_is_not_kept(self):
+    def test_a_software_encode_is_kept_whatever_its_probed_length(self):
+        """A timestamp jump in an MPEG-TS recording inflates the probed source length, so
+        software output is accepted on verification alone, as it always was."""
         commands = self._encode(codec='h264', hw_accel=False, source_codec='h264',
-                                source_duration=2400.0, encoded_duration=800.0)
+                                source_duration=5030.0, encoded_duration=90.0)
         self.assertEqual(len(commands), 1)
-        self.assertFalse(os.path.exists(self.output))
-        self.assertFalse(os.path.exists(self.output + '.tmp'))
+        self.assertTrue(os.path.exists(self.output))
+
+    def test_a_ts_source_that_fails_the_gpu_length_check_still_gets_its_encode(self):
+        commands = self._encode(codec='h264', hw='intel', source_codec='h264',
+                                source_duration=5030.0, encoded_duration=[90.0, 90.0])
+        self.assertEqual(len(commands), 2)
+        self.assertNotIn('-hwaccel', commands[1])
+        self.assertTrue(os.path.exists(self.output))
 
     def test_a_success_on_the_gpu_logs_which_path_it_took(self):
         with self.assertLogs(level='INFO') as logs:

@@ -992,13 +992,18 @@ def hardware_decode(source_path, video, codec):
 
 
 def _encode_once(command, subtitle_args, output_args, source_path, dest_file_temp, source_duration,
-                 retry_without_subtitles=True):
-    """Run one encode, retried without subtitles if they fail it and retry_without_subtitles
-    is set.  True when a verified, full-length encode is left at dest_file_temp; on False
-    nothing is left there."""
+                 gpu_run):
+    """Run one encode.  True when a verified encode is left at dest_file_temp; on False
+    nothing is left there.
+
+    A software run is retried without subtitles if they fail it, and is accepted on
+    verify_encoded_file alone.  A GPU run gets no subtitle retry, since software runs next
+    and has its own, and its video must also be as long as the source's.  The length check
+    stays off the software path because a timestamp jump in an MPEG-TS recording inflates
+    the probed source length, and there it would throw away the only good encode."""
     returncode = _run_ffmpeg(command + subtitle_args + output_args)
 
-    if returncode != 0 and subtitle_args and retry_without_subtitles:
+    if returncode != 0 and subtitle_args and not gpu_run:
         # A subtitle stream must never cost us the encode.
         logging.warning(f'FFmpeg failed with subtitles mapped (exit {returncode}), retrying without them: {source_path}')
         if os.path.exists(dest_file_temp):
@@ -1010,7 +1015,8 @@ def _encode_once(command, subtitle_args, output_args, source_path, dest_file_tem
         if os.path.exists(dest_file_temp):
             os.remove(dest_file_temp)
         return False
-    if not verify_encoded_file(dest_file_temp) or not encode_is_full_length(dest_file_temp, source_duration):
+    if not verify_encoded_file(dest_file_temp) or \
+            (gpu_run and not encode_is_full_length(dest_file_temp, source_duration)):
         logging.error(f'File verification failed, removing temp file: {dest_file_temp}')
         os.remove(dest_file_temp)
         return False
@@ -1234,9 +1240,8 @@ def encode_video(source_path, processed_files, processing_files):
                 '-vf', video_filter
             ] + video_encoder + audio_args
 
-            # A failed GPU run goes straight to software, which has its own subtitle retry.
             if _encode_once(command, subtitle_args, output_args, source_path, dest_file_temp,
-                            video['duration'], retry_without_subtitles=decode_path == 'software'):
+                            video['duration'], gpu_run=decode_path == 'hardware'):
                 os.rename(dest_file_temp, dest_file_final)
                 processed_files[dest_file_final] = True
                 logging.info(f'Encoding succeeded ({decode_path} decode): {dest_file_final}')
