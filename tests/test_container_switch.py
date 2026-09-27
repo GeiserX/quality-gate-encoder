@@ -655,13 +655,15 @@ class TestStallWatchdog(unittest.TestCase):
         self.assertLess(elapsed, 20)
 
     def test_a_slow_run_that_keeps_writing_is_left_alone(self):
-        """Three times the stall limit in total, but never a pause as long as the limit."""
-        code, elapsed = self._run('import sys, time\n'
-                                  'for _ in range(15):\n'
-                                  '    with open(sys.argv[1], "ab") as f: f.write(b"x")\n'
-                                  '    time.sleep(0.1)')
+        """Over twice the stall limit in total, but never a pause as long as the limit.
+        The limit is 2 s here so a child interpreter that is slow to start is not a stall."""
+        with patch.object(monitor, 'FFMPEG_STALL_SECONDS', 2.0):
+            code, elapsed = self._run('import sys, time\n'
+                                      'for _ in range(25):\n'
+                                      '    with open(sys.argv[1], "ab") as f: f.write(b"x")\n'
+                                      '    time.sleep(0.2)')
         self.assertEqual(code, 0)
-        self.assertGreater(elapsed, 1.5)
+        self.assertGreater(elapsed, 5.0)
 
 
 class TestHwDecodeSetting(unittest.TestCase):
