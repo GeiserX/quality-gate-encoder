@@ -853,22 +853,41 @@ FFMPEG_STALL_SECONDS = 600
 STALL_CHECK_SECONDS = 30
 
 
+def _write_progress(pid, output_path):
+    """A value that changes whenever FFmpeg writes: the output's size and mtime, plus the
+    bytes the process has written (wchar) where /proc has it.  The +faststart rewrite
+    moves data inside the MP4 without changing its size, so size alone reads as a stall."""
+    try:
+        stat = os.stat(output_path)
+        progress = [stat.st_size, stat.st_mtime_ns]
+    except OSError:
+        progress = [None, None]
+    try:
+        with open(f'/proc/{pid}/io') as f:
+            progress.append(next(line for line in f if line.startswith('wchar:')))
+    except (OSError, StopIteration):
+        progress.append(None)
+    return tuple(progress)
+
+
 def _kill_if_stalled(process, output_path):
-    """Kill FFmpeg once output_path has stopped growing for FFMPEG_STALL_SECONDS."""
-    last_size, last_change = None, time.monotonic()
+    """Kill FFmpeg once it has written nothing for FFMPEG_STALL_SECONDS.
+
+    A check that comes far later than scheduled means everything was frozen (docker pause,
+    SIGSTOP, a suspended host), which says nothing about FFmpeg, so the clock restarts."""
+    last_progress, last_change = None, time.monotonic()
+    last_check = last_change
     while process.poll() is None:
         time.sleep(STALL_CHECK_SECONDS)
-        try:
-            size = os.path.getsize(output_path)
-        except OSError:
-            size = None
         now = time.monotonic()
-        if size != last_size:
-            last_size, last_change = size, now
+        progress = _write_progress(process.pid, output_path)
+        if progress != last_progress or now - last_check > 3 * STALL_CHECK_SECONDS:
+            last_progress, last_change = progress, now
         elif now - last_change >= FFMPEG_STALL_SECONDS:
             logging.error(f'FFmpeg wrote nothing for {FFMPEG_STALL_SECONDS:g} s, stopping it: {output_path}')
             process.kill()
             return
+        last_check = now
 
 
 def _run_ffmpeg(command):

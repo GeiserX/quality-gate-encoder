@@ -674,6 +674,90 @@ class TestStallWatchdog(unittest.TestCase):
         self.assertGreater(elapsed, 5.0)
 
 
+class _FakeClock:
+    """Stands in for the time module inside the watchdog, so a freeze can be scripted."""
+
+    def __init__(self, steps):
+        self.now = 1000.0
+        self.steps = list(steps)
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += self.steps.pop(0) if self.steps else seconds
+
+
+class _FakeProcess:
+    """Runs for `checks` watchdog checks, calling `on_poll` at each one."""
+
+    pid = -1  # no /proc entry, so only the output file counts
+
+    def __init__(self, checks, on_poll=None):
+        self.checks, self.on_poll, self.killed = checks, on_poll, False
+
+    def poll(self):
+        if self.killed or self.checks == 0:
+            return 0
+        self.checks -= 1
+        if self.on_poll:
+            self.on_poll()
+        return None
+
+    def kill(self):
+        self.killed = True
+
+
+class TestStallWatchdogClock(unittest.TestCase):
+    """The watchdog's decisions, on a scripted clock: stall limit 10 s, a check every 1 s."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='encoder_stall_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.output = os.path.join(self.tmp, 'Movie - 720p.mp4.tmp')
+        with open(self.output, 'wb') as f:
+            f.write(b'moov and mdat')
+        for p in (patch.object(monitor, 'FFMPEG_STALL_SECONDS', 10),
+                  patch.object(monitor, 'STALL_CHECK_SECONDS', 1)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _watch(self, process, steps=()):
+        with patch.object(monitor, 'time', _FakeClock(steps)):
+            monitor._kill_if_stalled(process, self.output)
+        return process.killed
+
+    def test_a_silent_run_is_killed(self):
+        self.assertTrue(self._watch(_FakeProcess(checks=30)))
+
+    def test_a_rewrite_that_keeps_the_size_is_progress(self):
+        """+faststart moves data inside the file: same size, new mtime at every write."""
+        mtime = [1_000_000_000]
+
+        def rewrite_in_place():
+            mtime[0] += 1_000_000
+            os.utime(self.output, ns=(mtime[0], mtime[0]))
+
+        self.assertFalse(self._watch(_FakeProcess(checks=30, on_poll=rewrite_in_place)))
+
+    def test_a_freeze_restarts_the_clock_instead_of_killing(self):
+        """docker pause or SIGSTOP: one check arrives 100 s late, then 5 quiet seconds."""
+        self.assertFalse(self._watch(_FakeProcess(checks=8), steps=[1, 1, 100, 1, 1, 1, 1, 1]))
+
+    def test_a_stall_after_a_freeze_is_still_killed(self):
+        self.assertTrue(self._watch(_FakeProcess(checks=30), steps=[1, 100]))
+
+    @unittest.skipUnless(os.path.exists(f'/proc/{os.getpid()}/io'), 'needs /proc/<pid>/io (Linux)')
+    def test_linux_counts_bytes_the_process_wrote(self):
+        before = monitor._write_progress(os.getpid(), self.output)
+        with open(os.path.join(self.tmp, 'elsewhere'), 'wb') as f:
+            f.write(b'x' * 4096)
+        after = monitor._write_progress(os.getpid(), self.output)
+        self.assertIsNotNone(before[2])
+        self.assertNotEqual(before[2], after[2])
+        self.assertEqual(before[:2], after[:2])
+
+
 class TestHwDecodeSetting(unittest.TestCase):
     """HW_DECODE is read once, at import, so only a fresh import proves its name and default."""
 
