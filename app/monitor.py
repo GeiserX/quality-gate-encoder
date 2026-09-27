@@ -847,11 +847,37 @@ def resolve_audio_bitrate(channels):
     return '384k' if channels > 2 else '192k'
 
 
+# An encode whose output file has not grown for this long is hung, most often a GPU that
+# stopped answering.  A slow software encode still writes every few seconds.
+FFMPEG_STALL_SECONDS = 600
+STALL_CHECK_SECONDS = 30
+
+
+def _kill_if_stalled(process, output_path):
+    """Kill FFmpeg once output_path has stopped growing for FFMPEG_STALL_SECONDS."""
+    last_size, last_change = None, time.monotonic()
+    while process.poll() is None:
+        time.sleep(STALL_CHECK_SECONDS)
+        try:
+            size = os.path.getsize(output_path)
+        except OSError:
+            size = None
+        now = time.monotonic()
+        if size != last_size:
+            last_size, last_change = size, now
+        elif now - last_change >= FFMPEG_STALL_SECONDS:
+            logging.error(f'FFmpeg wrote nothing for {FFMPEG_STALL_SECONDS:g} s, stopping it: {output_path}')
+            process.kill()
+            return
+
+
 def _run_ffmpeg(command):
-    """Run an FFmpeg command, streaming its output to the log.  Returns the exit code."""
+    """Run an FFmpeg command, streaming its output to the log.  Returns the exit code,
+    which is non-zero when a stalled run had to be killed."""
     logging.info(f'FFmpeg command: {" ".join(command)}')
     process = subprocess.Popen(command, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True)
+    threading.Thread(target=_kill_if_stalled, args=(process, command[-1]), daemon=True).start()
     for line in process.stdout:
         logging.info(line.strip())
     return process.wait()

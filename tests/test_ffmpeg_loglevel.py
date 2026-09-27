@@ -114,6 +114,10 @@ class _Proc:
         """Stand in for the real process exit, which the encoder branches on."""
         return self._code
 
+    def poll(self):
+        """Already finished, so the stall watchdog has nothing to watch."""
+        return self._code
+
 
 @pytest.fixture
 def encode(tmp_path, monkeypatch):

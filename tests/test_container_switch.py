@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -599,6 +600,48 @@ class TestEncodeIsFullLength(unittest.TestCase):
                 self.assertTrue(monitor.verify_encoded_file(short))
                 self.assertFalse(monitor.encode_is_full_length(short, 20.0))
                 self.assertTrue(monitor.encode_is_full_length(full, 20.0))
+
+
+class TestStallWatchdog(unittest.TestCase):
+    """A hung FFmpeg is killed so the software path can run; a slow one is left alone.
+    Real child processes stand in for FFmpeg, since _run_ffmpeg only reads command[-1]."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='encoder_stall_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.output = os.path.join(self.tmp, 'Movie - 720p.mp4.tmp')
+        for p in (patch.object(monitor, 'FFMPEG_STALL_SECONDS', 0.5),
+                  patch.object(monitor, 'STALL_CHECK_SECONDS', 0.05)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _run(self, script):
+        start = time.monotonic()
+        code = monitor._run_ffmpeg([sys.executable, '-c', script, self.output])
+        return code, time.monotonic() - start
+
+    def test_a_run_that_stops_writing_is_killed(self):
+        with self.assertLogs(level='ERROR') as logs:
+            code, elapsed = self._run('import sys, time\n'
+                                      'open(sys.argv[1], "wb").write(b"header")\n'
+                                      'time.sleep(60)')
+        self.assertNotEqual(code, 0)
+        self.assertLess(elapsed, 20)
+        self.assertTrue(any('wrote nothing' in line for line in logs.output), logs.output)
+
+    def test_a_run_that_never_creates_its_output_is_killed(self):
+        code, elapsed = self._run('import time; time.sleep(60)')
+        self.assertNotEqual(code, 0)
+        self.assertLess(elapsed, 20)
+
+    def test_a_slow_run_that_keeps_writing_is_left_alone(self):
+        """Three times the stall limit in total, but never a pause as long as the limit."""
+        code, elapsed = self._run('import sys, time\n'
+                                  'for _ in range(15):\n'
+                                  '    with open(sys.argv[1], "ab") as f: f.write(b"x")\n'
+                                  '    time.sleep(0.1)')
+        self.assertEqual(code, 0)
+        self.assertGreater(elapsed, 1.5)
 
 
 class TestHwDecodeSetting(unittest.TestCase):
