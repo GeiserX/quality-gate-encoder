@@ -19,6 +19,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'app'))
 import monitor
 
 
+# The tests that run real FFmpeg skip where it is missing.  CI sets REQUIRE_FFMPEG=1, so there
+# a missing FFmpeg fails them instead of skipping them unnoticed.
+needs_ffmpeg = unittest.skipIf(
+    not os.environ.get('REQUIRE_FFMPEG') and (shutil.which('ffmpeg') is None or shutil.which('ffprobe') is None),
+    'needs ffmpeg and ffprobe')
+
+
 class EncodeTestBase(unittest.TestCase):
     """Temp source/dest folders with symlinks and manifest disabled."""
 
@@ -609,8 +616,7 @@ class TestEncodeIsFullLength(unittest.TestCase):
     def test_an_unknown_encoded_length_skips_the_check(self):
         self.assertTrue(self._check(2400.0, None)[0])
 
-    @unittest.skipIf(shutil.which('ffmpeg') is None or shutil.which('ffprobe') is None,
-                     'needs ffmpeg and ffprobe')
+    @needs_ffmpeg
     def test_real_files_with_short_video_under_long_audio(self):
         """2 s of video under 20 s of audio: verify_encoded_file passes it, this does not."""
         tmp = tempfile.mkdtemp(prefix='encoder_len_')
@@ -846,8 +852,7 @@ class TestGetVideoStream(unittest.TestCase):
             with self.subTest(value=bad):
                 self.assertIsNone(monitor._parse_duration_tag(bad))
 
-    @unittest.skipIf(shutil.which('ffmpeg') is None or shutil.which('ffprobe') is None,
-                     'needs ffmpeg and ffprobe')
+    @needs_ffmpeg
     def test_real_files(self):
         """The same probe against files FFmpeg itself tagged, not hand-written replies."""
         tmp = tempfile.mkdtemp(prefix='encoder_rot_')
