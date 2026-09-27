@@ -4,6 +4,7 @@ The property these tests exist to protect: changing ENCODING_CODEC (and with it
 the output container) must never re-encode a library that is already encoded.
 An output on disk is done, whatever container it was written in.
 """
+import json
 import os
 import shutil
 import subprocess
@@ -37,7 +38,7 @@ class EncodeTestBase(unittest.TestCase):
             patch.object(monitor, 'AUDIO_CHANNELS', 'auto'),
             # An unknown source codec decodes in software, the command these tests pin.
             patch.object(monitor, 'get_video_stream',
-                         return_value={'codec': None, 'rotation': 0, 'duration': None}),
+                         return_value={'codec': None, 'reoriented': False, 'duration': None}),
         ]
         for p in self._patches:
             p.start()
@@ -81,7 +82,7 @@ class EncodeTestBase(unittest.TestCase):
 
     def _run_encode(self, source, codec='h264', hw='intel', hw_accel=True,
                     audio_streams=None, subtitles=None, return_code=0,
-                    source_codec=None, rotation=0, source_duration=None, encoded_duration=None,
+                    source_codec=None, reoriented=False, source_duration=None, encoded_duration=None,
                     popen=None, verify=None):
         processed, processing = self._managers()
         # A list gives one encoded length per encode, in order.
@@ -102,7 +103,7 @@ class EncodeTestBase(unittest.TestCase):
              patch.object(monitor, 'get_audio_streams', return_value=audio_streams), \
              patch.object(monitor, 'get_subtitle_streams', return_value=subtitles), \
              patch.object(monitor, 'get_video_stream', side_effect=lambda p: {
-                 'codec': source_codec, 'rotation': rotation,
+                 'codec': source_codec, 'reoriented': reoriented,
                  'duration': next(encoded_lengths) if p.endswith('.tmp') else source_duration}), \
              patch.object(monitor, 'verify_encoded_file', side_effect=verify or (lambda p: True)), \
              patch('subprocess.Popen', side_effect=popen or self._fake_popen(return_code)):
@@ -475,17 +476,13 @@ class TestHardwareDecode(EncodeTestBase):
         commands = self._encode(codec='h264', hw='nvidia', source_codec='mpeg4')
         self.assertIn('-hwaccel', self._input_args(commands[0]))
 
-    def test_a_rotated_source_decodes_in_software(self):
-        """FFmpeg skips the display rotation for GPU frames, so a phone video tagged 90
+    def test_a_rotated_or_flipped_source_decodes_in_software(self):
+        """FFmpeg skips the display matrix for GPU frames, so a phone video tagged 90
         degrees would come out sideways and still pass verification."""
-        for rotation in (90, -90, 180):
-            with self.subTest(rotation=rotation):
-                self.ffmpeg_commands.clear()
-                commands = self._encode(codec='h264', hw='intel', source_codec='h264', rotation=rotation)
-                os.remove(self.output)
-                self.assertEqual(len(commands), 1)
-                self.assertNotIn('-hwaccel', commands[0])
-                self.assertEqual(commands[0][commands[0].index('-vf') + 1], 'scale=-1:720,format=yuv420p')
+        commands = self._encode(codec='h264', hw='intel', source_codec='h264', reoriented=True)
+        self.assertEqual(len(commands), 1)
+        self.assertNotIn('-hwaccel', commands[0])
+        self.assertEqual(commands[0][commands[0].index('-vf') + 1], 'scale=-1:720,format=yuv420p')
 
     def test_an_unknown_source_codec_decodes_in_software(self):
         commands = self._encode(codec='h264', hw='intel', source_codec=None)
@@ -589,7 +586,7 @@ class TestEncodeIsFullLength(unittest.TestCase):
 
     def _check(self, source, encoded):
         with patch.object(monitor, 'get_video_stream',
-                          return_value={'codec': 'h264', 'rotation': 0, 'duration': encoded}) as probe:
+                          return_value={'codec': 'h264', 'reoriented': False, 'duration': encoded}) as probe:
             return monitor.encode_is_full_length('/out.mp4.tmp', source), probe
 
     def test_a_short_video_fails(self):
@@ -779,6 +776,21 @@ class TestHwDecodeSetting(unittest.TestCase):
         self.assertEqual(self._hw_decode_from_environment('false'), 'HW_DECODE=False')
 
 
+def _matrix(*rows):
+    """ffprobe's displaymatrix dump for three rows of three numbers."""
+    return ''.join(f'\n{i:08x}: {row[0]:12d}' + ''.join(f' {v:11d}' for v in row[1:])
+                   for i, row in enumerate(rows)) + '\n'
+
+
+# What ffprobe prints for the display matrices FFmpeg writes with -display_rotation and
+# -display_vflip.  It reports 270 degrees as -90 and 180 as -180, and a flip as 0.
+IDENTITY = _matrix((65536, 0, 0), (0, 65536, 0), (0, 0, 1073741824))
+ROTATE_90 = _matrix((0, -65536, 0), (65536, 0, 0), (0, 0, 1073741824))
+ROTATE_270 = _matrix((0, 65536, 0), (-65536, 0, 0), (0, 0, 1073741824))
+ROTATE_180 = _matrix((-65536, 0, 0), (0, -65536, 0), (0, 0, 1073741824))
+VFLIP = _matrix((65536, 0, 0), (0, -65536, 0), (0, 0, 1073741824))
+
+
 class TestGetVideoStream(unittest.TestCase):
 
     def _probe(self, stdout, returncode=0):
@@ -786,42 +798,73 @@ class TestGetVideoStream(unittest.TestCase):
             info = monitor.get_video_stream('/x.mkv')
         return info, run
 
-    def test_reads_codec_and_display_matrix_rotation(self):
-        # What ffprobe 8.1 prints for an H.264 MP4 tagged with a 90 degree rotation.
-        info, run = self._probe('{"streams": [{"codec_name": "h264", "tags": {}, '
-                                '"side_data_list": [{"rotation": 90}]}]}')
-        self.assertEqual(info, {'codec': 'h264', 'rotation': 90.0, 'duration': None})
-        self.assertIn('v:0', run.call_args[0][0])
+    def _side_data(self, **side_data):
+        return self._probe(json.dumps({'streams': [{'codec_name': 'h264', 'side_data_list': [side_data]}]}))[0]
 
-    def test_reads_the_legacy_rotate_tag(self):
-        info, _ = self._probe('{"streams": [{"codec_name": "h264", "tags": {"rotate": "270"}}]}')
-        self.assertEqual(info['rotation'], 270.0)
+    def test_reads_the_codec_and_asks_for_the_matrix(self):
+        info, run = self._probe('{"streams": [{"codec_name": "h264"}]}')
+        self.assertEqual(info, {'codec': 'h264', 'reoriented': False, 'duration': None})
+        cmd = run.call_args[0][0]
+        self.assertIn('v:0', cmd)
+        self.assertIn('displaymatrix', cmd[cmd.index('-show_entries') + 1])
 
-    def test_an_upright_stream_has_no_rotation(self):
-        for stdout in ('{"streams": [{"codec_name": "hevc"}]}',
-                       '{"streams": [{"codec_name": "hevc", "side_data_list": [{"rotation": 0}]}]}',
-                       '{"streams": [{"codec_name": "hevc", "tags": {"rotate": "360"}}]}'):
-            info, _ = self._probe(stdout)
-            self.assertEqual(info, {'codec': 'hevc', 'rotation': 0, 'duration': None}, stdout)
+    def test_every_rotation_matrix_is_reoriented(self):
+        for matrix, rotation in ((ROTATE_90, 90), (ROTATE_270, -90), (ROTATE_180, -180)):
+            with self.subTest(rotation=rotation):
+                self.assertTrue(self._side_data(displaymatrix=matrix, rotation=rotation)['reoriented'])
+
+    def test_a_flip_is_reoriented_although_its_rotation_is_zero(self):
+        self.assertTrue(self._side_data(displaymatrix=VFLIP, rotation=0)['reoriented'])
+
+    def test_an_identity_matrix_is_upright(self):
+        self.assertFalse(self._side_data(displaymatrix=IDENTITY, rotation=0)['reoriented'])
+
+    def test_an_unreadable_matrix_counts_as_reoriented(self):
+        self.assertTrue(self._side_data(displaymatrix='garbled', rotation=0)['reoriented'])
+
+    def test_a_rotation_without_a_matrix_dump(self):
+        """Negative angles, as ffprobe prints them, and whole turns."""
+        for rotation, expected in ((-90, True), (-180, True), (90, True), (0, False), (360, False), (-360, False)):
+            with self.subTest(rotation=rotation):
+                self.assertEqual(self._side_data(rotation=rotation)['reoriented'], expected)
+
+    def test_the_legacy_rotate_tag(self):
+        for tag, expected in (('90', True), ('-90', True), ('-180', True), ('0', False), ('360', False), ('junk', False)):
+            with self.subTest(tag=tag):
+                info, _ = self._probe(json.dumps({'streams': [{'codec_name': 'h264', 'tags': {'rotate': tag}}]}))
+                self.assertEqual(info['reoriented'], expected)
 
     def test_a_failed_probe_is_unknown(self):
-        self.assertEqual(self._probe('', returncode=1)[0], {'codec': None, 'rotation': 0, 'duration': None})
+        self.assertEqual(self._probe('', returncode=1)[0], {'codec': None, 'reoriented': False, 'duration': None})
         with patch('subprocess.run', side_effect=OSError('no ffprobe')):
-            self.assertEqual(monitor.get_video_stream('/x.mkv'), {'codec': None, 'rotation': 0, 'duration': None})
+            self.assertEqual(monitor.get_video_stream('/x.mkv'), {'codec': None, 'reoriented': False, 'duration': None})
+
+    def test_parse_duration_tag(self):
+        self.assertEqual(monitor._parse_duration_tag('00:43:12.345000000'), 2592.345)
+        self.assertEqual(monitor._parse_duration_tag('02:00:00.000000000'), 7200.0)
+        for bad in (None, '', '43:12', 'N/A', '00:xx:12.0'):
+            with self.subTest(value=bad):
+                self.assertIsNone(monitor._parse_duration_tag(bad))
 
     @unittest.skipIf(shutil.which('ffmpeg') is None or shutil.which('ffprobe') is None,
                      'needs ffmpeg and ffprobe')
-    def test_a_real_rotated_file(self):
-        """The same probe against a file FFmpeg itself tagged, not a hand-written reply."""
+    def test_real_files(self):
+        """The same probe against files FFmpeg itself tagged, not hand-written replies."""
         tmp = tempfile.mkdtemp(prefix='encoder_rot_')
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        plain, rotated = os.path.join(tmp, 'plain.mp4'), os.path.join(tmp, 'rotated.mp4')
+        plain = os.path.join(tmp, 'plain.mp4')
         subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=320x240:d=1',
                         '-c:v', 'mpeg4', plain], check=True)
-        subprocess.run(['ffmpeg', '-v', 'error', '-display_rotation:v:0', '90', '-i', plain,
-                        '-c', 'copy', rotated], check=True)
-        self.assertEqual(monitor.get_video_stream(plain), {'codec': 'mpeg4', 'rotation': 0, 'duration': 1.0})
-        self.assertEqual(monitor.get_video_stream(rotated), {'codec': 'mpeg4', 'rotation': 90.0, 'duration': 1.0})
+        self.assertEqual(monitor.get_video_stream(plain), {'codec': 'mpeg4', 'reoriented': False, 'duration': 1.0})
+        for name, option in (('rotate90', ['-display_rotation:v:0', '90']),
+                             ('rotate270', ['-display_rotation:v:0', '270']),
+                             ('rotate180', ['-display_rotation:v:0', '180']),
+                             ('vflip', ['-display_vflip:v:0'])):
+            with self.subTest(name=name):
+                path = os.path.join(tmp, f'{name}.mp4')
+                subprocess.run(['ffmpeg', '-v', 'error'] + option + ['-i', plain, '-c', 'copy', path], check=True)
+                self.assertEqual(monitor.get_video_stream(path),
+                                 {'codec': 'mpeg4', 'reoriented': True, 'duration': 1.0})
 
 
 # ── Audio ───────────────────────────────────────────────────────────────────

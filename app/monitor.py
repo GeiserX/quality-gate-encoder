@@ -924,15 +924,34 @@ def _parse_duration_tag(value):
         return None
 
 
+# ffprobe's dump of an identity display matrix: nothing to rotate or flip.
+IDENTITY_DISPLAY_MATRIX = [65536, 0, 0, 0, 65536, 0, 0, 0, 1073741824]
+
+
+def _display_matrix(dump):
+    """The numbers in ffprobe's displaymatrix dump, or None when it cannot be read."""
+    try:
+        return [int(v) for line in dump.strip().splitlines() for v in line.split(':', 1)[1].split()]
+    except (AttributeError, IndexError, ValueError):
+        return None
+
+
+def _is_rotated(degrees):
+    try:
+        return degrees is not None and float(degrees) % 360 != 0
+    except (TypeError, ValueError):
+        return False
+
+
 def get_video_stream(filepath):
-    """Codec, display rotation (degrees) and duration (seconds) of the first video stream.
-    The codec and duration are None when ffprobe cannot tell; the rotation is 0 for a
-    stream without one."""
-    info = {'codec': None, 'rotation': 0, 'duration': None}
+    """Codec, orientation and duration (seconds) of the first video stream.  The codec and
+    duration are None when ffprobe cannot tell.  `reoriented` is True when the stream asks
+    to be rotated or flipped on display."""
+    info = {'codec': None, 'reoriented': False, 'duration': None}
     try:
         cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
                '-show_entries', 'stream=codec_name,duration:stream_tags=rotate,DURATION'
-               ':stream_side_data=rotation', '-of', 'json', filepath]
+               ':stream_side_data=rotation,displaymatrix', '-of', 'json', filepath]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         stream = (json.loads(result.stdout).get('streams') or [{}])[0] if result.returncode == 0 else {}
     except Exception as e:
@@ -940,15 +959,17 @@ def get_video_stream(filepath):
         return info
     info['codec'] = stream.get('codec_name')
     tags = {key.lower(): value for key, value in (stream.get('tags') or {}).items()}
-    # The display matrix, or the legacy "rotate" tag older muxers wrote.
-    for rotation in [d.get('rotation') for d in stream.get('side_data_list') or []] + \
-                    [tags.get('rotate')]:
-        try:
-            if rotation is not None and float(rotation) % 360:
-                info['rotation'] = float(rotation)
-                break
-        except (TypeError, ValueError):
-            continue
+    # Any display matrix but the identity counts, not only a rotation: a vertical flip
+    # reports rotation 0.  A matrix that cannot be read counts too.  Then the legacy
+    # "rotate" tag older muxers wrote.
+    for side_data in stream.get('side_data_list') or []:
+        if 'displaymatrix' in side_data:
+            if _display_matrix(side_data['displaymatrix']) != IDENTITY_DISPLAY_MATRIX:
+                info['reoriented'] = True
+        elif _is_rotated(side_data.get('rotation')):
+            info['reoriented'] = True
+    if _is_rotated(tags.get('rotate')):
+        info['reoriented'] = True
     # MP4 carries a per-stream duration; Matroska only has it as a DURATION tag.
     try:
         info['duration'] = float(stream['duration'])
@@ -997,10 +1018,10 @@ def hardware_decode(source_path, video, codec):
         logging.info(f'Software decode: the {HW_ENCODING_TYPE} GPU does not decode '
                      f'{video["codec"] or "an unknown codec"}: {source_path}')
         return None
-    if video['rotation']:
-        # FFmpeg does not apply the display rotation to GPU frames, and says nothing: the
-        # encode comes out sideways with exit 0.
-        logging.info(f'Software decode: the source is rotated {video["rotation"]:g} degrees, '
+    if video['reoriented']:
+        # FFmpeg does not rotate or flip GPU frames, and says nothing: the encode comes out
+        # sideways or upside down with exit 0.
+        logging.info(f'Software decode: the source has a display rotation or flip, '
                      f'which FFmpeg only applies in software: {source_path}')
         return None
     input_args, scale_filter = HW_DECODE_ARGS[HW_ENCODING_TYPE]
