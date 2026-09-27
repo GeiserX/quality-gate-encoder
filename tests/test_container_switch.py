@@ -35,7 +35,7 @@ class EncodeTestBase(unittest.TestCase):
             patch.object(monitor, 'AUDIO_BITRATE', 'auto'),
             patch.object(monitor, 'AUDIO_CHANNELS', 'auto'),
             # An unknown source codec decodes in software, the command these tests pin.
-            patch.object(monitor, 'get_video_codec', return_value=None),
+            patch.object(monitor, 'get_video_stream', return_value={'codec': None, 'rotation': 0}),
         ]
         for p in self._patches:
             p.start()
@@ -79,7 +79,7 @@ class EncodeTestBase(unittest.TestCase):
 
     def _run_encode(self, source, codec='h264', hw='intel', hw_accel=True,
                     audio_streams=None, subtitles=None, return_code=0,
-                    source_codec=None, popen=None, verify=None):
+                    source_codec=None, rotation=0, popen=None, verify=None):
         processed, processing = self._managers()
         if audio_streams is None:
             audio_streams = [{'index': 1, 'codec_name': 'ac3', 'channels': 6}]
@@ -95,7 +95,8 @@ class EncodeTestBase(unittest.TestCase):
              patch.object(monitor, 'wait_for_file_completion', return_value=True), \
              patch.object(monitor, 'get_audio_streams', return_value=audio_streams), \
              patch.object(monitor, 'get_subtitle_streams', return_value=subtitles), \
-             patch.object(monitor, 'get_video_codec', return_value=source_codec), \
+             patch.object(monitor, 'get_video_stream',
+                          return_value={'codec': source_codec, 'rotation': rotation}), \
              patch.object(monitor, 'verify_encoded_file', side_effect=verify or (lambda p: True)), \
              patch('subprocess.Popen', side_effect=popen or self._fake_popen(return_code)):
             monitor.encode_video(source, processed, processing)
@@ -467,6 +468,18 @@ class TestHardwareDecode(EncodeTestBase):
         commands = self._encode(codec='h264', hw='nvidia', source_codec='mpeg4')
         self.assertIn('-hwaccel', self._input_args(commands[0]))
 
+    def test_a_rotated_source_decodes_in_software(self):
+        """FFmpeg skips the display rotation for GPU frames, so a phone video tagged 90
+        degrees would come out sideways and still pass verification."""
+        for rotation in (90, -90, 180):
+            with self.subTest(rotation=rotation):
+                self.ffmpeg_commands.clear()
+                commands = self._encode(codec='h264', hw='intel', source_codec='h264', rotation=rotation)
+                os.remove(self.output)
+                self.assertEqual(len(commands), 1)
+                self.assertNotIn('-hwaccel', commands[0])
+                self.assertEqual(commands[0][commands[0].index('-vf') + 1], 'scale=-1:720,format=yuv420p')
+
     def test_an_unknown_source_codec_decodes_in_software(self):
         commands = self._encode(codec='h264', hw='intel', source_codec=None)
         self.assertEqual(len(commands), 1)
@@ -542,19 +555,49 @@ class TestHwDecodeSetting(unittest.TestCase):
         self.assertEqual(self._hw_decode_from_environment('false'), 'HW_DECODE=False')
 
 
-class TestGetVideoCodec(unittest.TestCase):
+class TestGetVideoStream(unittest.TestCase):
 
-    def test_reads_the_first_video_stream(self):
-        result = MagicMock(returncode=0, stdout='hevc\n')
-        with patch('subprocess.run', return_value=result) as run:
-            self.assertEqual(monitor.get_video_codec('/x.mkv'), 'hevc')
+    def _probe(self, stdout, returncode=0):
+        with patch('subprocess.run', return_value=MagicMock(returncode=returncode, stdout=stdout)) as run:
+            info = monitor.get_video_stream('/x.mkv')
+        return info, run
+
+    def test_reads_codec_and_display_matrix_rotation(self):
+        # What ffprobe 8.1 prints for an H.264 MP4 tagged with a 90 degree rotation.
+        info, run = self._probe('{"streams": [{"codec_name": "h264", "tags": {}, '
+                                '"side_data_list": [{"rotation": 90}]}]}')
+        self.assertEqual(info, {'codec': 'h264', 'rotation': 90.0})
         self.assertIn('v:0', run.call_args[0][0])
 
+    def test_reads_the_legacy_rotate_tag(self):
+        info, _ = self._probe('{"streams": [{"codec_name": "h264", "tags": {"rotate": "270"}}]}')
+        self.assertEqual(info['rotation'], 270.0)
+
+    def test_an_upright_stream_has_no_rotation(self):
+        for stdout in ('{"streams": [{"codec_name": "hevc"}]}',
+                       '{"streams": [{"codec_name": "hevc", "side_data_list": [{"rotation": 0}]}]}',
+                       '{"streams": [{"codec_name": "hevc", "tags": {"rotate": "360"}}]}'):
+            info, _ = self._probe(stdout)
+            self.assertEqual(info, {'codec': 'hevc', 'rotation': 0}, stdout)
+
     def test_a_failed_probe_is_unknown(self):
-        with patch('subprocess.run', return_value=MagicMock(returncode=1, stdout='')):
-            self.assertIsNone(monitor.get_video_codec('/x.mkv'))
+        self.assertEqual(self._probe('', returncode=1)[0], {'codec': None, 'rotation': 0})
         with patch('subprocess.run', side_effect=OSError('no ffprobe')):
-            self.assertIsNone(monitor.get_video_codec('/x.mkv'))
+            self.assertEqual(monitor.get_video_stream('/x.mkv'), {'codec': None, 'rotation': 0})
+
+    @unittest.skipIf(shutil.which('ffmpeg') is None or shutil.which('ffprobe') is None,
+                     'needs ffmpeg and ffprobe')
+    def test_a_real_rotated_file(self):
+        """The same probe against a file FFmpeg itself tagged, not a hand-written reply."""
+        tmp = tempfile.mkdtemp(prefix='encoder_rot_')
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        plain, rotated = os.path.join(tmp, 'plain.mp4'), os.path.join(tmp, 'rotated.mp4')
+        subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=320x240:d=1',
+                        '-c:v', 'mpeg4', plain], check=True)
+        subprocess.run(['ffmpeg', '-v', 'error', '-display_rotation:v:0', '90', '-i', plain,
+                        '-c', 'copy', rotated], check=True)
+        self.assertEqual(monitor.get_video_stream(plain), {'codec': 'mpeg4', 'rotation': 0})
+        self.assertEqual(monitor.get_video_stream(rotated), {'codec': 'mpeg4', 'rotation': 90.0})
 
 
 # ── Audio ───────────────────────────────────────────────────────────────────

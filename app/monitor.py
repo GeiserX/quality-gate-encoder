@@ -870,17 +870,30 @@ HW_DECODE_ARGS = {
 }
 
 
-def get_video_codec(filepath):
-    """Codec of the first video stream, or None when ffprobe cannot tell."""
+def get_video_stream(filepath):
+    """Codec and display rotation (degrees) of the first video stream.  The codec is None
+    when ffprobe cannot tell; the rotation is 0 for a stream without one."""
+    info = {'codec': None, 'rotation': 0}
     try:
         cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
-               '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', filepath]
+               '-show_entries', 'stream=codec_name:stream_tags=rotate:stream_side_data=rotation',
+               '-of', 'json', filepath]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip().split('\n')[0]
+        stream = (json.loads(result.stdout).get('streams') or [{}])[0] if result.returncode == 0 else {}
     except Exception as e:
-        logging.debug(f'ffprobe codec check failed for {filepath}: {e}')
-    return None
+        logging.debug(f'ffprobe video stream check failed for {filepath}: {e}')
+        return info
+    info['codec'] = stream.get('codec_name')
+    # The display matrix, or the legacy "rotate" tag older muxers wrote.
+    for rotation in [d.get('rotation') for d in stream.get('side_data_list') or []] + \
+                    [(stream.get('tags') or {}).get('rotate')]:
+        try:
+            if rotation is not None and float(rotation) % 360:
+                info['rotation'] = float(rotation)
+                break
+        except (TypeError, ValueError):
+            continue
+    return info
 
 
 def software_decode(codec):
@@ -893,15 +906,20 @@ def software_decode(codec):
     return [], video_filter
 
 
-def hardware_decode(source_path, codec):
+def hardware_decode(source_path, video, codec):
     """Input options and video filter that keep decoding and scaling on the GPU, or None
-    when this source is decoded in software."""
+    when this source is decoded in software.  `video` is get_video_stream() of the source."""
     if not HW_DECODE or HW_ENCODING_TYPE not in HW_DECODE_ARGS:
         return None
-    source_codec = get_video_codec(source_path)
-    if source_codec not in HW_DECODE_CODECS[HW_ENCODING_TYPE]:
+    if video['codec'] not in HW_DECODE_CODECS[HW_ENCODING_TYPE]:
         logging.info(f'Software decode: the {HW_ENCODING_TYPE} GPU does not decode '
-                     f'{source_codec or "an unknown codec"}: {source_path}')
+                     f'{video["codec"] or "an unknown codec"}: {source_path}')
+        return None
+    if video['rotation']:
+        # FFmpeg does not apply the display rotation to GPU frames, and says nothing: the
+        # encode comes out sideways with exit 0.
+        logging.info(f'Software decode: the source is rotated {video["rotation"]:g} degrees, '
+                     f'which FFmpeg only applies in software: {source_path}')
         return None
     input_args, scale_filter = HW_DECODE_ARGS[HW_ENCODING_TYPE]
     video_filter = f'{scale_filter}=w=-1:h=720'
@@ -1137,7 +1155,8 @@ def encode_video(source_path, processed_files, processing_files):
         # The GPU path goes first when there is one.  Software decoding always follows it,
         # so a source the card cannot handle still gets its encode.
         decoders = []
-        gpu_decode = hardware_decode(source_path, codec) if hw_enc_supported else None
+        video = get_video_stream(source_path)
+        gpu_decode = hardware_decode(source_path, video, codec) if hw_enc_supported else None
         if gpu_decode:
             decoders.append(('hardware', gpu_decode))
         decoders.append(('software', software_decode(codec)))

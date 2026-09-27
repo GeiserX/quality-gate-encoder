@@ -179,6 +179,7 @@ On 1080p sources this cut the CPU time of an encode by 10 to 16 times on an Inte
 Every file still gets its encode:
 
 - A source in a codec the GPU does not decode (for example MPEG-4 Part 2, which covers Xvid and DivX, on Intel) is decoded in software from the start.
+- A source with a display rotation (a phone video shot in portrait, say) is decoded in software too. FFmpeg does not rotate GPU frames, so the encode would come out sideways.
 - If the GPU run fails, or its output fails verification, the file is encoded again straight away with software decoding and scaling. This covers profiles the card refuses, such as 10-bit H.264.
 
 The log says which path each file took (`Encoding succeeded (hardware decode)` or `(software decode)`) and why a fallback happened. Set `HW_DECODE: "false"` to decode and scale in software as releases before this one did.
