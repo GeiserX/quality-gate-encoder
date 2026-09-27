@@ -550,6 +550,26 @@ class TestHardwareDecode(EncodeTestBase):
             self._encode(codec='h264', hw='intel', source_codec='h264')
         self.assertTrue(any('Encoding succeeded (hardware decode)' in line for line in logs.output), logs.output)
 
+    def test_a_failed_hardware_run_goes_straight_to_software_with_subtitles(self):
+        """No GPU retry without subtitles: software runs next and keeps its own retry."""
+        commands = self.ffmpeg_commands
+
+        def _popen(cmd, **kwargs):
+            commands.append(list(cmd))
+            proc = MagicMock()
+            proc.stdout = iter([])
+            failed = '-hwaccel' in cmd or '-c:s:0' in cmd
+            with open(cmd[-1], 'wb') as f:
+                f.write(b'half written' if failed else b'fake encoded data')
+            proc.wait.return_value = 1 if failed else 0
+            return proc
+
+        self._encode(codec='h264', hw='intel', source_codec='h264', popen=_popen,
+                     subtitles={'copy': [], 'convert': [(2, 'subrip')]})
+        self.assertEqual([('-hwaccel' in c, '-sn' in c) for c in commands],
+                         [(True, False), (False, False), (False, True)])
+        self.assertEqual(open(self.output, 'rb').read(), b'fake encoded data')
+
     def test_when_both_paths_fail_nothing_is_left_behind(self):
         commands = self._encode(codec='h264', hw='intel', source_codec='h264', return_code=1)
         self.assertEqual(len(commands), 2)
