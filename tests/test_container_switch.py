@@ -665,6 +665,16 @@ class TestStallWatchdog(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertLess(elapsed, 20)
 
+    def test_log_output_alone_is_not_progress(self):
+        """FFmpeg keeps redrawing its stats line while stalled; only the output file counts."""
+        code, elapsed = self._run('import sys, time\n'
+                                  'open(sys.argv[1], "wb").write(b"header")\n'
+                                  'for _ in range(600):\n'
+                                  '    print("frame= 1 fps=0.0 time=00:00:00.04 speed=0x", flush=True)\n'
+                                  '    time.sleep(0.05)')
+        self.assertNotEqual(code, 0)
+        self.assertLess(elapsed, 20)
+
     def test_a_slow_run_that_keeps_writing_is_left_alone(self):
         """Over twice the stall limit in total, but never a pause as long as the limit.
         The limit is 2 s here so a child interpreter that is slow to start is not a stall."""
@@ -693,8 +703,6 @@ class _FakeClock:
 
 class _FakeProcess:
     """Runs for `checks` watchdog checks, calling `on_poll` at each one."""
-
-    pid = -1  # no /proc entry, so only the output file counts
 
     def __init__(self, checks, on_poll=None):
         self.checks, self.on_poll, self.killed = checks, on_poll, False
@@ -749,16 +757,6 @@ class TestStallWatchdogClock(unittest.TestCase):
 
     def test_a_stall_after_a_freeze_is_still_killed(self):
         self.assertTrue(self._watch(_FakeProcess(checks=30), steps=[1, 100]))
-
-    @unittest.skipUnless(os.path.exists(f'/proc/{os.getpid()}/io'), 'needs /proc/<pid>/io (Linux)')
-    def test_linux_counts_bytes_the_process_wrote(self):
-        before = monitor._write_progress(os.getpid(), self.output)
-        with open(os.path.join(self.tmp, 'elsewhere'), 'wb') as f:
-            f.write(b'x' * 4096)
-        after = monitor._write_progress(os.getpid(), self.output)
-        self.assertIsNotNone(before[2])
-        self.assertNotEqual(before[2], after[2])
-        self.assertEqual(before[:2], after[:2])
 
 
 class TestHwDecodeSetting(unittest.TestCase):

@@ -853,21 +853,16 @@ FFMPEG_STALL_SECONDS = 600
 STALL_CHECK_SECONDS = 30
 
 
-def _write_progress(pid, output_path):
-    """A value that changes whenever FFmpeg writes: the output's size and mtime, plus the
-    bytes the process has written (wchar) where /proc has it.  The +faststart rewrite
-    moves data inside the MP4 without changing its size, so size alone reads as a stall."""
+def _write_progress(output_path):
+    """A value that changes whenever FFmpeg writes to its output: the file's size and mtime.
+    The +faststart rewrite moves data inside the MP4 without changing its size, but every
+    write moves the mtime.  Bytes written anywhere else do not count: FFmpeg redraws its
+    stats line twice a second even while stalled."""
     try:
         stat = os.stat(output_path)
-        progress = [stat.st_size, stat.st_mtime_ns]
+        return stat.st_size, stat.st_mtime_ns
     except OSError:
-        progress = [None, None]
-    try:
-        with open(f'/proc/{pid}/io') as f:
-            progress.append(next(line for line in f if line.startswith('wchar:')))
-    except (OSError, StopIteration):
-        progress.append(None)
-    return tuple(progress)
+        return None, None
 
 
 def _kill_if_stalled(process, output_path):
@@ -880,7 +875,7 @@ def _kill_if_stalled(process, output_path):
     while process.poll() is None:
         time.sleep(STALL_CHECK_SECONDS)
         now = time.monotonic()
-        progress = _write_progress(process.pid, output_path)
+        progress = _write_progress(output_path)
         if progress != last_progress or now - last_check > 3 * STALL_CHECK_SECONDS:
             last_progress, last_change = progress, now
         elif now - last_change >= FFMPEG_STALL_SECONDS:
