@@ -91,6 +91,7 @@ All settings are controlled via environment variables.
 | `DEST_FOLDER` | `/app/destination` | Path to the directory for encoded output |
 | `ENABLE_HW_ACCEL` | `true` | Enable hardware-accelerated encoding |
 | `HW_ENCODING_TYPE` | `nvidia` | Hardware encoder: `nvidia` or `intel` |
+| `HW_DECODE` | `true` | Decode and scale on the GPU as well as encode; `false` decodes and scales in software (see [Decoding on the GPU](#decoding-on-the-gpu)) |
 | `ENCODING_CODEC` | `hevc` | Output codec: `hevc`, `h264`, or `av1` |
 | `OUTPUT_CONTAINER` | `auto` | Container: `auto` (MP4 for H.264, MKV otherwise), `mkv`, or `mp4` |
 | `ENCODING_QUALITY` | `LOW` | Quality preset: `LOW`, `MEDIUM`, or `HIGH` |
@@ -168,6 +169,19 @@ devices:
 ```
 
 Set `HW_ENCODING_TYPE: "intel"`. Supported encoders: `hevc_qsv`, `h264_qsv`, `av1_qsv`.
+
+### Decoding on the GPU
+
+With a hardware encoder, the source is decoded and scaled to 720p on the same GPU, so the frames never pass through the CPU. Intel uses `-hwaccel qsv` with `scale_qsv`, NVIDIA uses `-hwaccel cuda` with `scale_cuda`. The encoder settings are the same as on the software path. For H.264 output the GPU converts to 8-bit 4:2:0 (`nv12`), so 10-bit sources still produce 8-bit H.264; HEVC and AV1 keep the source bit depth, as they do in software.
+
+On 1080p sources this cut the CPU time of an encode by 10 to 16 times on an Intel iGPU, and by about 40 times on an NVIDIA card.
+
+Every file still gets its encode:
+
+- A source in a codec the GPU does not decode (for example MPEG-4 Part 2, which covers Xvid and DivX, on Intel) is decoded in software from the start.
+- If the GPU run fails, or its output fails verification, the file is encoded again straight away with software decoding and scaling. This covers profiles the card refuses, such as 10-bit H.264.
+
+The log says which path each file took (`Encoding succeeded (hardware decode)` or `(software decode)`) and why a fallback happened. Set `HW_DECODE: "false"` to decode and scale in software as releases before this one did.
 
 ### Software Fallback
 

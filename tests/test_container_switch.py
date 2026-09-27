@@ -6,6 +6,7 @@ An output on disk is done, whatever container it was written in.
 """
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -33,6 +34,8 @@ class EncodeTestBase(unittest.TestCase):
             patch.object(monitor, 'AUDIO_CODEC', 'auto'),
             patch.object(monitor, 'AUDIO_BITRATE', 'auto'),
             patch.object(monitor, 'AUDIO_CHANNELS', 'auto'),
+            # An unknown source codec decodes in software, the command these tests pin.
+            patch.object(monitor, 'get_video_codec', return_value=None),
         ]
         for p in self._patches:
             p.start()
@@ -75,7 +78,8 @@ class EncodeTestBase(unittest.TestCase):
         return _side_effect
 
     def _run_encode(self, source, codec='h264', hw='intel', hw_accel=True,
-                    audio_streams=None, subtitles=None, return_code=0):
+                    audio_streams=None, subtitles=None, return_code=0,
+                    source_codec=None, popen=None, verify=None):
         processed, processing = self._managers()
         if audio_streams is None:
             audio_streams = [{'index': 1, 'codec_name': 'ac3', 'channels': 6}]
@@ -91,8 +95,9 @@ class EncodeTestBase(unittest.TestCase):
              patch.object(monitor, 'wait_for_file_completion', return_value=True), \
              patch.object(monitor, 'get_audio_streams', return_value=audio_streams), \
              patch.object(monitor, 'get_subtitle_streams', return_value=subtitles), \
-             patch.object(monitor, 'verify_encoded_file', return_value=True), \
-             patch('subprocess.Popen', side_effect=self._fake_popen(return_code)):
+             patch.object(monitor, 'get_video_codec', return_value=source_codec), \
+             patch.object(monitor, 'verify_encoded_file', side_effect=verify or (lambda p: True)), \
+             patch('subprocess.Popen', side_effect=popen or self._fake_popen(return_code)):
             monitor.encode_video(source, processed, processing)
         return processed
 
@@ -377,6 +382,179 @@ class TestH264CommandShape(EncodeTestBase):
         self.assertEqual(cmd[cmd.index('-f') + 1], 'matroska')
         self.assertNotIn('-movflags', cmd)
         self.assertTrue(cmd[-1].endswith('Movie - 720p.mkv.tmp'))
+
+
+# ── Decoding and scaling on the GPU ─────────────────────────────────────────
+
+class TestHardwareDecode(EncodeTestBase):
+    """With a GPU encoder, decoding and scaling run on the GPU too, and any file the
+    hardware path cannot finish is encoded again with software decoding."""
+
+    def _encode(self, **kwargs):
+        source = self._touch(self.source_dir, 'Movie.mkv')
+        self._run_encode(source, **kwargs)
+        self.output = os.path.join(self.dest_dir, 'Movie - 720p.mp4')
+        return self.ffmpeg_commands
+
+    def _fail_on_hardware_popen(self):
+        """Popen stand-in where every GPU-decoded run fails and every other one works."""
+        commands = self.ffmpeg_commands
+
+        def _side_effect(cmd, **kwargs):
+            commands.append(list(cmd))
+            proc = MagicMock()
+            proc.stdout = iter([])
+            if '-hwaccel' in cmd:
+                with open(cmd[-1], 'wb') as f:
+                    f.write(b'half written')
+                proc.wait.return_value = 1
+            else:
+                with open(cmd[-1], 'wb') as f:
+                    f.write(b'fake encoded data')
+                proc.wait.return_value = 0
+            return proc
+
+        return _side_effect
+
+    @staticmethod
+    def _input_args(cmd):
+        return cmd[:cmd.index('-i')]
+
+    @staticmethod
+    def _encoder_args(cmd):
+        start = cmd.index('-c:v')
+        return cmd[start:cmd.index('-map', start)]
+
+    def test_intel_decodes_and_scales_on_the_igpu(self):
+        commands = self._encode(codec='h264', hw='intel', source_codec='h264')
+        self.assertEqual(len(commands), 1)
+        cmd = commands[0]
+        before_input = self._input_args(cmd)
+        self.assertEqual(before_input[before_input.index('-hwaccel') + 1], 'qsv')
+        self.assertEqual(before_input[before_input.index('-hwaccel_output_format') + 1], 'qsv')
+        # nv12 is 8-bit 4:2:0: a 10-bit source still ends up as 8-bit H.264.
+        self.assertEqual(cmd[cmd.index('-vf') + 1], 'scale_qsv=w=-1:h=720:format=nv12')
+        self.assertEqual(cmd[cmd.index('-c:v') + 1], 'h264_qsv')
+        self.assertEqual(cmd[cmd.index('-global_quality') + 1], '28')
+
+    def test_intel_hevc_output_keeps_the_source_bit_depth(self):
+        """The software HEVC path forces no pixel format, so the GPU path must not either."""
+        commands = self._encode(codec='hevc', hw='intel', source_codec='hevc')
+        cmd = commands[0]
+        self.assertEqual(cmd[cmd.index('-vf') + 1], 'scale_qsv=w=-1:h=720')
+        self.assertEqual(cmd[cmd.index('-c:v') + 1], 'hevc_qsv')
+
+    def test_nvidia_decodes_and_scales_with_cuda(self):
+        commands = self._encode(codec='h264', hw='nvidia', source_codec='hevc')
+        self.assertEqual(len(commands), 1)
+        cmd = commands[0]
+        before_input = self._input_args(cmd)
+        self.assertEqual(before_input[before_input.index('-hwaccel') + 1], 'cuda')
+        self.assertEqual(before_input[before_input.index('-hwaccel_output_format') + 1], 'cuda')
+        self.assertEqual(cmd[cmd.index('-vf') + 1], 'scale_cuda=w=-1:h=720:format=nv12')
+        self.assertEqual(cmd[cmd.index('-c:v') + 1], 'h264_nvenc')
+
+    def test_a_codec_the_igpu_cannot_decode_goes_straight_to_software(self):
+        """Xvid has no decoder on an Intel iGPU, so the hardware run is not even tried."""
+        commands = self._encode(codec='h264', hw='intel', source_codec='mpeg4')
+        self.assertEqual(len(commands), 1)
+        self.assertNotIn('-hwaccel', commands[0])
+        self.assertEqual(commands[0][commands[0].index('-vf') + 1], 'scale=-1:720,format=yuv420p')
+        self.assertIn('h264_qsv', commands[0])
+
+    def test_the_same_codec_decodes_on_nvidia(self):
+        """The list is per GPU: NVDEC does decode MPEG-4 Part 2."""
+        commands = self._encode(codec='h264', hw='nvidia', source_codec='mpeg4')
+        self.assertIn('-hwaccel', self._input_args(commands[0]))
+
+    def test_an_unknown_source_codec_decodes_in_software(self):
+        commands = self._encode(codec='h264', hw='intel', source_codec=None)
+        self.assertEqual(len(commands), 1)
+        self.assertNotIn('-hwaccel', commands[0])
+
+    def test_hw_decode_false_restores_software_decoding(self):
+        with patch.object(monitor, 'HW_DECODE', False):
+            commands = self._encode(codec='h264', hw='intel', source_codec='h264')
+        self.assertEqual(len(commands), 1)
+        self.assertNotIn('-hwaccel', commands[0])
+        self.assertEqual(commands[0][commands[0].index('-vf') + 1], 'scale=-1:720,format=yuv420p')
+        self.assertIn('h264_qsv', commands[0])
+
+    def test_software_encoding_never_decodes_on_a_gpu(self):
+        commands = self._encode(codec='h264', hw_accel=False, source_codec='h264')
+        self.assertEqual(len(commands), 1)
+        self.assertNotIn('-hwaccel', commands[0])
+        self.assertIn('libx264', commands[0])
+
+    def test_a_failed_hardware_run_is_encoded_again_in_software(self):
+        """A GPU that refuses the source must never leave it without its 720p copy."""
+        with self.assertLogs(level='WARNING') as logs:
+            commands = self._encode(codec='h264', hw='intel', source_codec='h264',
+                                    popen=self._fail_on_hardware_popen())
+        self.assertEqual(len(commands), 2)
+        self.assertIn('-hwaccel', commands[0])
+        self.assertNotIn('-hwaccel', commands[1])
+        self.assertEqual(commands[1][commands[1].index('-vf') + 1], 'scale=-1:720,format=yuv420p')
+        self.assertEqual(self._encoder_args(commands[0]), self._encoder_args(commands[1]))
+        self.assertEqual(open(self.output, 'rb').read(), b'fake encoded data')
+        self.assertTrue(any('Hardware decode failed' in line for line in logs.output), logs.output)
+
+    def test_a_hardware_encode_that_fails_verification_is_encoded_again_in_software(self):
+        """Exit 0 is not enough: an output that fails verification falls back too."""
+        verdicts = iter([False, True])
+        commands = self._encode(codec='h264', hw='intel', source_codec='h264',
+                                verify=lambda p: next(verdicts))
+        self.assertEqual(len(commands), 2)
+        self.assertIn('-hwaccel', commands[0])
+        self.assertNotIn('-hwaccel', commands[1])
+        self.assertTrue(os.path.exists(self.output))
+
+    def test_a_success_on_the_gpu_logs_which_path_it_took(self):
+        with self.assertLogs(level='INFO') as logs:
+            self._encode(codec='h264', hw='intel', source_codec='h264')
+        self.assertTrue(any('Encoding succeeded (hardware decode)' in line for line in logs.output), logs.output)
+
+    def test_when_both_paths_fail_nothing_is_left_behind(self):
+        commands = self._encode(codec='h264', hw='intel', source_codec='h264', return_code=1)
+        self.assertEqual(len(commands), 2)
+        self.assertFalse(os.path.exists(self.output))
+        self.assertFalse(os.path.exists(self.output + '.tmp'))
+
+
+class TestHwDecodeSetting(unittest.TestCase):
+    """HW_DECODE is read once, at import, so only a fresh import proves its name and default."""
+
+    def _hw_decode_from_environment(self, value):
+        app_dir = os.path.join(os.path.dirname(__file__), '..', 'app')
+        env = dict(os.environ)
+        env.pop('HW_DECODE', None)
+        if value is not None:
+            env['HW_DECODE'] = value
+        result = subprocess.run(
+            [sys.executable, '-c', 'import monitor; print("HW_DECODE=" + str(monitor.HW_DECODE))'],
+            cwd=app_dir, env=env, capture_output=True, text=True, timeout=120)
+        return result.stdout.strip().splitlines()[-1]
+
+    def test_on_by_default(self):
+        self.assertEqual(self._hw_decode_from_environment(None), 'HW_DECODE=True')
+
+    def test_false_turns_it_off(self):
+        self.assertEqual(self._hw_decode_from_environment('false'), 'HW_DECODE=False')
+
+
+class TestGetVideoCodec(unittest.TestCase):
+
+    def test_reads_the_first_video_stream(self):
+        result = MagicMock(returncode=0, stdout='hevc\n')
+        with patch('subprocess.run', return_value=result) as run:
+            self.assertEqual(monitor.get_video_codec('/x.mkv'), 'hevc')
+        self.assertIn('v:0', run.call_args[0][0])
+
+    def test_a_failed_probe_is_unknown(self):
+        with patch('subprocess.run', return_value=MagicMock(returncode=1, stdout='')):
+            self.assertIsNone(monitor.get_video_codec('/x.mkv'))
+        with patch('subprocess.run', side_effect=OSError('no ffprobe')):
+            self.assertIsNone(monitor.get_video_codec('/x.mkv'))
 
 
 # ── Audio ───────────────────────────────────────────────────────────────────

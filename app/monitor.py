@@ -23,6 +23,8 @@ import datetime
 # Env variables
 ENABLE_HW_ACCEL = os.getenv('ENABLE_HW_ACCEL', 'true').lower() == 'true'
 HW_ENCODING_TYPE = os.getenv('HW_ENCODING_TYPE', 'nvidia').lower()  # nvidia, intel
+# Decode and scale on the GPU as well, not just encode.  'false' decodes and scales in software.
+HW_DECODE = os.getenv('HW_DECODE', 'true').lower() == 'true'
 ENCODING_QUALITY = os.getenv('ENCODING_QUALITY', 'LOW').upper()  # LOW, MEDIUM, HIGH
 ENCODING_CODEC = os.getenv('ENCODING_CODEC', 'hevc').lower()  # hevc, h264 or av1
 OUTPUT_CONTAINER = os.getenv('OUTPUT_CONTAINER', 'auto').lower()  # auto, mkv, mp4
@@ -492,7 +494,7 @@ FFMPEG_LOGLEVEL = _parse_ffmpeg_loglevel(os.getenv('FFMPEG_LOGLEVEL', 'warning')
 
 logging.info(f'Config: SOURCE_FOLDER={SOURCE_FOLDER}, DEST_FOLDER={DEST_FOLDER}, '
              f'CODEC={resolve_codec()}, CONTAINER={resolve_container()}, QUALITY={ENCODING_QUALITY}, '
-             f'HW={HW_ENCODING_TYPE if ENABLE_HW_ACCEL else "disabled"}, '
+             f'HW={HW_ENCODING_TYPE if ENABLE_HW_ACCEL else "disabled"}, HW_DECODE={HW_DECODE}, '
              f'AUDIO={AUDIO_CODEC}/{AUDIO_BITRATE}/{AUDIO_CHANNELS}ch, '
              f'MANIFEST_TARGET={SYMLINK_MANIFEST_TARGET or "disabled"}, '
              f'SKIP_IF_LOW_QUALITY_EXISTS={SKIP_IF_LOW_QUALITY_EXISTS}, '
@@ -854,6 +856,84 @@ def _run_ffmpeg(command):
         logging.info(line.strip())
     return process.wait()
 
+
+# Source codecs each GPU decodes, so decoding and scaling can stay on the card.  A source in
+# any other codec, such as Xvid on an Intel iGPU, is decoded in software from the start.  A
+# profile the card still refuses (10-bit H.264, for one) fails at once and falls back.
+HW_DECODE_CODECS = {
+    'intel': {'h264', 'hevc', 'av1', 'vp9', 'mpeg2video', 'vc1'},
+    'nvidia': {'h264', 'hevc', 'av1', 'vp9', 'vp8', 'mpeg1video', 'mpeg2video', 'mpeg4', 'vc1'},
+}
+HW_DECODE_ARGS = {
+    'intel': (['-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv'], 'scale_qsv'),
+    'nvidia': (['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'], 'scale_cuda'),
+}
+
+
+def get_video_codec(filepath):
+    """Codec of the first video stream, or None when ffprobe cannot tell."""
+    try:
+        cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+               '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', filepath]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().split('\n')[0]
+    except Exception as e:
+        logging.debug(f'ffprobe codec check failed for {filepath}: {e}')
+    return None
+
+
+def software_decode(codec):
+    """Input options and video filter for decoding and scaling on the CPU."""
+    video_filter = 'scale=-1:720'
+    if codec == 'h264':
+        # 8-bit 4:2:0 is the only pixel format the hardware H.264 encoders
+        # accept, and the only one every H.264 decoder can play.
+        video_filter += ',format=yuv420p'
+    return [], video_filter
+
+
+def hardware_decode(source_path, codec):
+    """Input options and video filter that keep decoding and scaling on the GPU, or None
+    when this source is decoded in software."""
+    if not HW_DECODE or HW_ENCODING_TYPE not in HW_DECODE_ARGS:
+        return None
+    source_codec = get_video_codec(source_path)
+    if source_codec not in HW_DECODE_CODECS[HW_ENCODING_TYPE]:
+        logging.info(f'Software decode: the {HW_ENCODING_TYPE} GPU does not decode '
+                     f'{source_codec or "an unknown codec"}: {source_path}')
+        return None
+    input_args, scale_filter = HW_DECODE_ARGS[HW_ENCODING_TYPE]
+    video_filter = f'{scale_filter}=w=-1:h=720'
+    if codec == 'h264':
+        video_filter += ':format=nv12'  # 8-bit 4:2:0, as on the software path
+    return list(input_args), video_filter
+
+
+def _encode_once(command, subtitle_args, output_args, source_path, dest_file_temp):
+    """Run one encode, retried without subtitles if they fail it.  True when a verified
+    encode is left at dest_file_temp; on False nothing is left there."""
+    returncode = _run_ffmpeg(command + subtitle_args + output_args)
+
+    if returncode != 0 and subtitle_args:
+        # A subtitle stream must never cost us the encode.
+        logging.warning(f'FFmpeg failed with subtitles mapped (exit {returncode}), retrying without them: {source_path}')
+        if os.path.exists(dest_file_temp):
+            os.remove(dest_file_temp)
+        returncode = _run_ffmpeg(command + ['-sn'] + output_args)
+
+    if returncode != 0:
+        logging.error(f'FFmpeg encoding failed (exit {returncode}) for file: {source_path}')
+        if os.path.exists(dest_file_temp):
+            os.remove(dest_file_temp)
+        return False
+    if not verify_encoded_file(dest_file_temp):
+        logging.error(f'File verification failed, removing temp file: {dest_file_temp}')
+        os.remove(dest_file_temp)
+        return False
+    return True
+
+
 def encode_video(source_path, processed_files, processing_files):
     if processing_files.get(source_path):
         logging.info(f'Already processing: {source_path}')
@@ -1017,30 +1097,16 @@ def encode_video(source_path, processed_files, processing_files):
             logging.error(f'No audio streams found in file: {source_path}')
             return
 
-        video_filter = 'scale=-1:720'
-        if codec == 'h264':
-            # 8-bit 4:2:0 is the only pixel format the hardware H.264 encoders
-            # accept, and the only one every H.264 decoder can play.
-            video_filter += ',format=yuv420p'
-
-        # Build the FFmpeg command
-        command = [
-            'ffmpeg', '-loglevel', FFMPEG_LOGLEVEL, '-y',
-            '-analyzeduration', '100M', '-probesize', '100M',
-            '-i', source_path,
-            '-map', '0:v:0',
-            '-vf', video_filter
-        ] + video_encoder
-
         # Process each audio stream
+        audio_args = []
         audio_codec = resolve_audio_codec(container)
         for idx, stream in enumerate(audio_streams):
             channels = resolve_audio_channels(stream, audio_codec)
             # Map the audio stream
-            command.extend(['-map', f'0:a:{idx}'])
-            command.extend([f'-c:a:{idx}', audio_codec,
-                            f'-b:a:{idx}', resolve_audio_bitrate(channels),
-                            f'-ac:a:{idx}', str(channels)])
+            audio_args.extend(['-map', f'0:a:{idx}'])
+            audio_args.extend([f'-c:a:{idx}', audio_codec,
+                               f'-b:a:{idx}', resolve_audio_bitrate(channels),
+                               f'-ac:a:{idx}', str(channels)])
 
         # Map subtitles with codec handling for the target container
         subtitle_streams = get_subtitle_streams(source_path, container)
@@ -1068,31 +1134,33 @@ def encode_video(source_path, processed_files, processing_files):
             output_args.extend(['-movflags', '+faststart'])
         output_args.append(dest_file_temp)
 
-        returncode = _run_ffmpeg(command + subtitle_args + output_args)
+        # The GPU path goes first when there is one.  Software decoding always follows it,
+        # so a source the card cannot handle still gets its encode.
+        decoders = []
+        gpu_decode = hardware_decode(source_path, codec) if hw_enc_supported else None
+        if gpu_decode:
+            decoders.append(('hardware', gpu_decode))
+        decoders.append(('software', software_decode(codec)))
 
-        if returncode != 0 and subtitle_args:
-            # A subtitle stream must never cost us the encode.
-            logging.warning(f'FFmpeg failed with subtitles mapped (exit {returncode}), retrying without them: {source_path}')
-            if os.path.exists(dest_file_temp):
-                os.remove(dest_file_temp)
-            returncode = _run_ffmpeg(command + ['-sn'] + output_args)
+        for decode_path, (input_args, video_filter) in decoders:
+            command = ['ffmpeg', '-loglevel', FFMPEG_LOGLEVEL, '-y'] + input_args + [
+                '-analyzeduration', '100M', '-probesize', '100M',
+                '-i', source_path,
+                '-map', '0:v:0',
+                '-vf', video_filter
+            ] + video_encoder + audio_args
 
-        if returncode == 0:
-            if verify_encoded_file(dest_file_temp):
+            if _encode_once(command, subtitle_args, output_args, source_path, dest_file_temp):
                 os.rename(dest_file_temp, dest_file_final)
                 processed_files[dest_file_final] = True
-                logging.info(f'Encoding succeeded: {dest_file_final}')
-                
+                logging.info(f'Encoding succeeded ({decode_path} decode): {dest_file_final}')
+
                 # Create version symlink for Jellyfin multi-version support
                 create_version_symlink(source_path, dest_file_final)
                 _manifest_add(os.path.relpath(dest_file_final, DEST_FOLDER))
-            else:
-                logging.error(f'File verification failed, removing temp file: {dest_file_temp}')
-                os.remove(dest_file_temp)
-        else:
-            logging.error(f'FFmpeg encoding failed (exit {returncode}) for file: {source_path}')
-            if os.path.exists(dest_file_temp):
-                os.remove(dest_file_temp)
+                break
+            if decode_path == 'hardware':
+                logging.warning(f'Hardware decode failed, retrying with software decode and scaling: {source_path}')
     finally:
         processing_files.pop(source_path, None)
 

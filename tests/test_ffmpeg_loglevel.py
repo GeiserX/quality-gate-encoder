@@ -134,6 +134,7 @@ def encode(tmp_path, monkeypatch):
     monkeypatch.setattr(monitor, 'get_subtitle_streams',
                         lambda *a, **k: {'copy': [], 'convert': []})
     monkeypatch.setattr(monitor, 'verify_encoded_file', lambda *a, **k: True)
+    monkeypatch.setattr(monitor, 'get_video_codec', lambda *a, **k: None)
 
     def _run(return_code=0):
         """Drive one encode and return every command FFmpeg would have been given."""

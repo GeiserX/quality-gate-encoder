@@ -35,6 +35,7 @@ docker compose up
 - Never hardcode media paths; use environment variables and volume mounts
 - Docker images use semver tags on Docker Hub (drumsergio/quality-gate-encoder)
 - Always support hardware acceleration fallback to software encoding (libx265/libx264/libsvtav1)
+- GPU decoding (`HW_DECODE`) always has a per-file software decode fallback; a source must never be left without its encode because the GPU could not decode it
 - Temp-file workflow (`.tmp` extension) with atomic rename to prevent indexing incomplete files
 - Mount-health checks must pass before any cleanup/deletion operations
 - An existing output is done whatever container it uses. Locate encodes by filename stem across every supported extension, never by a hardcoded `.mkv`, so a codec or container switch never re-encodes an existing library
