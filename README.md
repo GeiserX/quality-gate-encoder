@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/banner.svg" alt="quality-gate-encoder banner" width="900"/>
+  <img src="https://raw.githubusercontent.com/GeiserX/quality-gate-encoder/main/docs/images/banner.svg" alt="quality-gate-encoder banner" width="900"/>
 </p>
 
 <p align="center">
