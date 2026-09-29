@@ -35,7 +35,7 @@
 ```bash
 docker run -d --name quality-gate-encoder --device /dev/dri:/dev/dri \
   -v /path/to/source:/app/source -v /path/to/destination:/app/destination \
-  -e HW_ENCODING_TYPE=intel --restart always drumsergio/quality-gate-encoder:1.5.11
+  -e HW_ENCODING_TYPE=intel --restart always drumsergio/quality-gate-encoder:1.5.12
 ```
 
 Docker Compose, NVIDIA setup and the full option list are in [Getting started](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/getting-started.md) and [Configuration](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/configuration.md).

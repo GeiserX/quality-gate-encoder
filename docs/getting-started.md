@@ -5,7 +5,7 @@
 ```yaml
 services:
   quality-gate-encoder:
-    image: drumsergio/quality-gate-encoder:1.5.11
+    image: drumsergio/quality-gate-encoder:1.5.12
     container_name: quality-gate-encoder
     devices:
       - /dev/dri:/dev/dri  # Intel QSV -- remove if using NVIDIA or software encoding
@@ -42,7 +42,7 @@ docker run -d \
   -e ENCODING_QUALITY=LOW \
   -e POLL_INTERVAL=60 \
   --restart always \
-  drumsergio/quality-gate-encoder:1.5.11
+  drumsergio/quality-gate-encoder:1.5.12
 ```
 
 ## Hardware Acceleration

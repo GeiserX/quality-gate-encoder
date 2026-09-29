@@ -12,7 +12,7 @@ Set `SYMLINK_MANIFEST_TARGET` to the path prefix as seen **inside the Jellyfin c
 ```yaml
 services:
   quality-gate-encoder:
-    image: drumsergio/quality-gate-encoder:1.5.11
+    image: drumsergio/quality-gate-encoder:1.5.12
     environment:
       SYMLINK_MANIFEST_TARGET: "/media-720/Peliculas"  # Jellyfin container path
       # ...other settings
