@@ -1,4 +1,4 @@
-# Architecture
+# How it works
 
 ```
 Source folder (polling observer)
@@ -61,6 +61,6 @@ a plain create and is handled the same way.
 - **H.264 / AAC / MP4 output** -- set `ENCODING_CODEC: "h264"` for MP4 output that Jellyfin clients direct play without transcoding, and without re-encoding the library you already have (see [H.264, AAC and MP4 Output](configuration.md#h264-aac-and-mp4-output))
 - **Audio normalization** -- re-encodes audio for consistent playback: AAC keeping up to 5.1 for MP4, stereo AC3 at 192 kbps for MKV
 - **Subtitle preservation** -- copies MKV-native subtitle codecs and converts incompatible ones (MOV text, WebVTT) to SRT; converts text subtitles to `mov_text` for MP4
-- **Guarded automatic cleanup** -- periodically removes orphaned encodes and stale symlinks with mount-health checks to prevent mass deletion (see [Safety & Cleanup](safety.md#safety--cleanup) below)
+- **Guarded automatic cleanup** -- periodically removes orphaned encodes and stale symlinks with mount-health checks to prevent mass deletion (see [Safety and cleanup](safety.md) below)
 - **Temp-file workflow** -- encodes to `.tmp` and atomically renames on success, so Jellyfin never indexes incomplete files (note: no cross-container locking — avoid pointing two encoders at the same destination subfolder)
 - **Configurable quality presets** -- LOW, MEDIUM, and HIGH profiles with per-codec CQ/CRF tuning

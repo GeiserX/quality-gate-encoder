@@ -1,4 +1,4 @@
-# Cross-Host Manifest Mode
+# Cross-host manifest mode
 
 When the encoder and Jellyfin run on **different hosts** (e.g., encoder on a NAS, Jellyfin on another server connected via CIFS/SMB), real symlinks cannot be created over the network mount. The manifest mode solves this:
 
@@ -12,7 +12,7 @@ Set `SYMLINK_MANIFEST_TARGET` to the path prefix as seen **inside the Jellyfin c
 ```yaml
 services:
   quality-gate-encoder:
-    image: drumsergio/quality-gate-encoder:1.5.6
+    image: drumsergio/quality-gate-encoder:1.5.12
     environment:
       SYMLINK_MANIFEST_TARGET: "/media-720/Peliculas"  # Jellyfin container path
       # ...other settings

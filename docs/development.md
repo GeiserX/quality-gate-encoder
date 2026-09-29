@@ -1,4 +1,4 @@
-# Contributing
+# Development
 
 Contributions are welcome. Please open an issue to discuss proposed changes before submitting a pull request.
 
