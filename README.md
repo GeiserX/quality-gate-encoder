@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/GeiserX/quality-gate-encoder/main/docs/images/banner.svg" alt="quality-gate-encoder banner" width="900"/>
+  <img src="https://raw.githubusercontent.com/GeiserX/quality-gate-encoder/main/docs/images/banner.svg" alt="quality-gate-encoder" width="900"/>
 </p>
 
 <p align="center">
@@ -35,22 +35,22 @@
 ```bash
 docker run -d --name quality-gate-encoder --device /dev/dri:/dev/dri \
   -v /path/to/source:/app/source -v /path/to/destination:/app/destination \
-  -e HW_ENCODING_TYPE=intel --restart always drumsergio/quality-gate-encoder:1.5.6
+  -e HW_ENCODING_TYPE=intel --restart always drumsergio/quality-gate-encoder:1.5.11
 ```
 
-Docker Compose, NVIDIA setup and the full option list are in [Installation](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/installation.md) and [Configuration](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/configuration.md).
+Docker Compose, NVIDIA setup and the full option list are in [Getting started](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/getting-started.md) and [Configuration](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/configuration.md).
 
 ## Documentation
 
-- [Installation](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/installation.md): Docker Compose and CLI, NVIDIA and Intel, GPU decoding, software fallback, upgrading
+- [Getting started](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/getting-started.md): Docker Compose and CLI, NVIDIA and Intel, GPU decoding, software fallback, upgrading
 - [Configuration](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/configuration.md): environment variables, quality presets, H.264/MP4 output, free-space floor, priority list, FFmpeg log level
+- [How it works](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/how-it-works.md): pipeline, design decisions, polling interval
 - [Safety and cleanup](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/safety.md)
 - [Cross-host manifest mode](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/cross-host.md)
-- [Architecture](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/architecture.md): pipeline, design decisions, polling interval
 - [Utilities](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/utilities.md): `compare_encodes.py`
-- [Contributing](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/contributing.md)
+- [Development](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/development.md)
 - [Related projects](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/related.md)
 
 ## License
 
-This project is licensed under the [GPL-3.0 License](LICENSE).
+[GPL-3.0-or-later](https://github.com/GeiserX/quality-gate-encoder/blob/main/LICENSE)

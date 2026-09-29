@@ -1,4 +1,4 @@
-# Safety & Cleanup
+# Safety and cleanup
 
 The encoder periodically removes orphaned encodes (files in `DEST_FOLDER` with no matching source) and stale version symlinks. Several safety rails prevent accidental mass deletion:
 

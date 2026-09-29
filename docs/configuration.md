@@ -8,7 +8,7 @@ All settings are controlled via environment variables.
 | `DEST_FOLDER` | `/app/destination` | Path to the directory for encoded output |
 | `ENABLE_HW_ACCEL` | `true` | Enable hardware-accelerated encoding |
 | `HW_ENCODING_TYPE` | `nvidia` | Hardware encoder: `nvidia` or `intel` |
-| `HW_DECODE` | `true` | Decode and scale on the GPU as well as encode; `false` decodes and scales in software (see [Decoding on the GPU](installation.md#decoding-on-the-gpu)) |
+| `HW_DECODE` | `true` | Decode and scale on the GPU as well as encode; `false` decodes and scales in software (see [Decoding on the GPU](getting-started.md#decoding-on-the-gpu)) |
 | `ENCODING_CODEC` | `hevc` | Output codec: `hevc`, `h264`, or `av1` |
 | `OUTPUT_CONTAINER` | `auto` | Container: `auto` (MP4 for H.264, MKV otherwise), `mkv`, or `mp4` |
 | `ENCODING_QUALITY` | `LOW` | Quality preset: `LOW`, `MEDIUM`, or `HIGH` |
@@ -19,7 +19,7 @@ All settings are controlled via environment variables.
 | `SYMLINK_MANIFEST_TARGET` | _(empty)_ | Path prefix for cross-host manifest-based symlinks (see [Cross-Host Setup](cross-host.md)) |
 | `SYMLINK_VERSION_SUFFIX` | ` - 720p` | Suffix appended to symlink filenames |
 | `CLEANUP_INTERVAL_HOURS` | `6` | Hours between automatic orphan cleanup runs |
-| `POLL_INTERVAL` | `60` | Seconds the folder watcher waits between scans of the source tree (see [Polling interval](architecture.md#polling-interval)) |
+| `POLL_INTERVAL` | `60` | Seconds the folder watcher waits between scans of the source tree (see [Polling interval](how-it-works.md#polling-interval)) |
 | `DEST_MIN_FREE_GB` | `0` | Free-space floor for the destination, in GB: encodes wait while the destination filesystem has less than this free (see [Free-space floor](configuration.md#free-space-floor)) |
 | `FFMPEG_LOGLEVEL` | `warning` | What FFmpeg writes to the container log during an encode (see [FFmpeg log level](configuration.md#ffmpeg-log-level)) |
 | `PRIORITY_FILE` | `$SOURCE_FOLDER/.encoder-priority.json` | JSON list of source paths to encode before the rest (see [Priority list](configuration.md#priority-list)) |

@@ -1,11 +1,11 @@
-# Installation
+# Getting started
 
 ## Docker Compose
 
 ```yaml
 services:
   quality-gate-encoder:
-    image: drumsergio/quality-gate-encoder:1.5.6
+    image: drumsergio/quality-gate-encoder:1.5.11
     container_name: quality-gate-encoder
     devices:
       - /dev/dri:/dev/dri  # Intel QSV -- remove if using NVIDIA or software encoding
@@ -42,7 +42,7 @@ docker run -d \
   -e ENCODING_QUALITY=LOW \
   -e POLL_INTERVAL=60 \
   --restart always \
-  drumsergio/quality-gate-encoder:1.5.6
+  drumsergio/quality-gate-encoder:1.5.11
 ```
 
 ## Hardware Acceleration
@@ -109,7 +109,7 @@ docker exec quality-gate-encoder python /app/scripts/migrate_encode_names.py --a
 ### Upgrading to 1.4.0
 
 Two behaviours change for an existing install; both are described under
-[Polling interval](architecture.md#polling-interval).
+[Polling interval](how-it-works.md#polling-interval).
 
 - The source tree is scanned every 60 seconds instead of every second. Set
   `POLL_INTERVAL=1` to keep the old cadence.
