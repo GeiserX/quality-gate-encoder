@@ -15,7 +15,7 @@
 **quality-gate-encoder** watches a Jellyfin library and adds a 720p copy beside every film and episode, so phones and remote viewers direct play the copy instead of making the server transcode live for each stream. It runs as a Docker container on Linux, encodes on an Intel or NVIDIA GPU or in software, leaves the original file untouched, and Jellyfin lists the copy as a second version of the same title. The [Quality Gate](https://github.com/GeiserX/quality-gate) plugin is optional: it caps chosen users at the 720p copy and tells the encoder which titles to make first.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/GeiserX/quality-gate-encoder/main/docs/images/screenshots/jellyfin-versions.png" alt="A film's page in Jellyfin after the encoder ran: the Version menu offers the original and the 720p copy, and the video line below reads 720p H264" width="900">
+  <img src="https://raw.githubusercontent.com/GeiserX/quality-gate-encoder/main/docs/images/screenshots/jellyfin-versions.png" alt="A film's page in Jellyfin after the encoder ran: the Version menu is set to 720p and the video line below reads 720p H264" width="900">
 </p>
 
 ## Features
