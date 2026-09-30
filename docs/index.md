@@ -1,7 +1,6 @@
 ---
 hide:
   - navigation
-  - toc
 ---
 
 # quality-gate-encoder { .qge-visually-hidden }
