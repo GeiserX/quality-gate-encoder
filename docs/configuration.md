@@ -24,6 +24,9 @@ All settings are controlled via environment variables.
 | `FFMPEG_LOGLEVEL` | `warning` | What FFmpeg writes to the container log during an encode (see [FFmpeg log level](configuration.md#ffmpeg-log-level)) |
 | `PRIORITY_FILE` | `$SOURCE_FOLDER/.encoder-priority.json` | JSON list of source paths to encode before the rest (see [Priority list](configuration.md#priority-list)) |
 | `PRIORITY_MAX_AGE_HOURS` | `0` | Hours a priority list counts after its `generated` time; older lists are ignored. `0` turns the check off (see [Priority list](configuration.md#priority-list)) |
+| `MAX_HW_WORKERS` | `1` | Encodes run at once on the GPU; ignored when `ENABLE_HW_ACCEL` is `false` (software runs one worker per CPU core) |
+| `SKIP_IF_LOW_QUALITY_EXISTS` | `true` | Skip a source when a sibling file already at 720p or lower sits beside it |
+| `IMAGE_MOVED_TO` | _(empty)_ | Set only on `drumsergio/jellyfin-encoder` images; makes the startup log say where the image moved |
 
 ## Quality Presets
 
@@ -68,7 +71,9 @@ MP4 carries text subtitles only. The encoder converts text tracks (SRT, ASS/SSA,
 
 At every start the encoder queues every source in the order the folder walk finds them, so
 on a large library the next episode of a show people are watching can sit thousands of files
-down the queue. `PRIORITY_FILE` lets something outside the encoder put those first. The
+down the queue. `PRIORITY_FILE` lets something outside the encoder put those first; the
+[Quality Gate plugin](https://github.com/GeiserX/quality-gate/blob/main/docs/encode-priority.md)
+writes it from what capped viewers are about to watch, and anything else may write the same format. The
 encoder only reads it, so it can live on a read-only source mount.
 
 ```json

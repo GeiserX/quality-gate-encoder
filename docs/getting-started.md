@@ -10,7 +10,7 @@ services:
     devices:
       - /dev/dri:/dev/dri  # Intel QSV -- remove if using NVIDIA or software encoding
     volumes:
-      - /path/to/source:/app/source
+      - /path/to/source:/app/source        # read-write: the " - 720p" links go here
       - /path/to/destination:/app/destination
     environment:
       ENABLE_HW_ACCEL: "true"
@@ -18,6 +18,7 @@ services:
       ENCODING_QUALITY: "LOW"     # LOW | MEDIUM | HIGH
       ENCODING_CODEC: "hevc"      # hevc | av1
       POLL_INTERVAL: "60"         # seconds between scans of the source tree
+      SYMLINK_TARGET_PREFIX: "/path/to/destination"  # the destination as Jellyfin sees it; needed for the Version menu
     restart: always
 
     # For NVIDIA GPU support, replace the devices block above with:
@@ -41,9 +42,50 @@ docker run -d \
   -e ENCODING_CODEC=hevc \
   -e ENCODING_QUALITY=LOW \
   -e POLL_INTERVAL=60 \
+  -e SYMLINK_TARGET_PREFIX=/path/to/destination \
   --restart always \
   drumsergio/quality-gate-encoder:1.5.12
 ```
+
+## What you see when it worked
+
+The log of a first run on a four-film demo library, software encoding (a GPU run says `hardware decode` instead).
+Files already in the library are queued at startup without a line each; a file added later logs `New video file detected:` first.
+
+```text
+2026-09-30 12:57:50,691 - INFO - Config: SOURCE_FOLDER=/app/source, DEST_FOLDER=/app/destination, CODEC=h264, CONTAINER=mp4, QUALITY=LOW, HW=disabled, HW_DECODE=True, AUDIO=auto/auto/autoch, MANIFEST_TARGET=disabled, SKIP_IF_LOW_QUALITY_EXISTS=True, POLL_INTERVAL=10s, FFMPEG_LOGLEVEL=warning, PRIORITY_FILE=/app/source/.encoder-priority.json, PRIORITY_MAX_AGE_HOURS=0
+2026-09-30 12:57:50,958 - INFO - Monitoring started (polling every 10s).
+2026-09-30 12:57:51,866 - INFO - Skipping file (ffprobe: 576p ≤ 720p): Elephants Dream (2006).mkv
+2026-09-30 13:16:01,038 - INFO - Encoding succeeded (software decode): /app/destination/Big Buck Bunny (2008)/Big Buck Bunny (2008) - 720p.mp4
+2026-09-30 13:16:01,045 - INFO - Created version symlink: /app/source/Big Buck Bunny (2008)/Big Buck Bunny (2008) - 720p.mp4 -> /media-720p/Big Buck Bunny (2008)/Big Buck Bunny (2008) - 720p.mp4
+2026-09-30 13:19:38,049 - INFO - Encoding succeeded (software decode): /app/destination/Tears of Steel (2012)/Tears of Steel (2012) - 720p.mp4
+2026-09-30 13:19:38,055 - INFO - Created version symlink: /app/source/Tears of Steel (2012)/Tears of Steel (2012) - 720p.mp4 -> /media-720p/Tears of Steel (2012)/Tears of Steel (2012) - 720p.mp4
+2026-09-30 13:20:22,642 - INFO - Encoding succeeded (software decode): /app/destination/Sintel (2010)/Sintel (2010) - 720p.mp4
+2026-09-30 13:20:22,644 - INFO - Created version symlink: /app/source/Sintel (2010)/Sintel (2010) - 720p.mp4 -> /media-720p/Sintel (2010)/Sintel (2010) - 720p.mp4
+```
+
+The film's folder afterwards: the original and a link beside it, named so Jellyfin groups the two as versions
+of one title.
+
+```text
+total 43412
+lrwxr-xr-x 1 root root       66 Sep 30 13:16 Big Buck Bunny (2008) - 720p.mp4 -> /media-720p/Big Buck Bunny (2008)/Big Buck Bunny (2008) - 720p.mp4
+-rw-r--r-- 1 root root 44451362 Sep 30 12:55 Big Buck Bunny (2008).mkv
+```
+
+In Jellyfin, the film's page gets a **Version** menu with the copy, phones pick it, and the player's Playback
+Info reads Direct Play:
+
+<p align="center"><img src="images/screenshots/jellyfin-versions-mobile.png" alt="The film's page on a phone: the Version menu is set to 720p and the video line reads 720p H264" width="300"> <img src="images/screenshots/jellyfin-direct-play.png" alt="The Jellyfin player on the 720p copy with Playback Info open: Direct playing, 1280x720, H264" width="600"></p>
+
+The library itself does not change: each title is listed once.
+
+<p align="center"><img src="images/screenshots/jellyfin-library.png" alt="The Movies library in Jellyfin after the run: four posters, each film once" width="900"></p>
+
+No Version menu? `SYMLINK_TARGET_PREFIX` is unset (the log has no `Created version symlink` line), the source
+mount is read-only (`Failed to create version symlink` in the log), or the prefix is not the path Jellyfin's
+container mounts the destination at (the link exists but Jellyfin ignores it). Jellyfin on another host: see
+[Cross-host manifest mode](cross-host.md).
 
 ## Hardware Acceleration
 
@@ -100,10 +142,10 @@ Starting with v1.1.0, encoded outputs always include the version suffix (e.g., `
 
 ```bash
 # Dry-run (shows what would be renamed)
-docker exec quality-gate-encoder python /app/scripts/migrate_encode_names.py
+docker exec quality-gate-encoder python3 /app/scripts/migrate_encode_names.py
 
 # Apply renames
-docker exec quality-gate-encoder python /app/scripts/migrate_encode_names.py --apply
+docker exec quality-gate-encoder python3 /app/scripts/migrate_encode_names.py --apply
 ```
 
 ### Upgrading to 1.4.0
@@ -116,3 +158,9 @@ Two behaviours change for an existing install; both are described under
 - A video renamed inside the source tree, or a renamed folder, is now handled within one
   poll. Before, it waited for the next container restart. Since 1.5.2 the finished encode
   moves with it; 1.4.0 through 1.5.1 re-encoded it under the new name.
+
+### Moving from jellyfin-encoder
+
+The image moved to `drumsergio/quality-gate-encoder`. Change the image name; every variable, path and file name
+stays the same. Every release is also published as `drumsergio/jellyfin-encoder` until 2027-03-31, and those
+images log a notice at startup; after that date the old name stays pullable but gets no new versions.
