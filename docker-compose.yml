@@ -5,7 +5,7 @@ services:
     devices:
       - /dev/dri:/dev/dri
     volumes:
-      - /source:/app/source
+      - /source:/app/source        # read-write: the " - 720p" links go here
       - /dest:/app/destination
     environment:
       ENABLE_HW_ACCEL: "true"
@@ -15,6 +15,7 @@ services:
       DEST_FOLDER: "/app/destination"
       ENCODING_CODEC: "hevc"
       POLL_INTERVAL: "60"   # seconds between scans of the source tree
+      SYMLINK_TARGET_PREFIX: "/dest"  # the destination as Jellyfin sees it; needed for the Version menu
     restart: always
     # For NVIDIA GPU support, uncomment below:
     # deploy:

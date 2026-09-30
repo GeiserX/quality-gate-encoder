@@ -19,7 +19,7 @@ Usage:
     python compare_encodes.py --source /path/to/source --dest /path/to/dest --format json
 
     # Run inside Docker container
-    docker exec encoder_peliculas python /app/scripts/compare_encodes.py
+    docker exec quality-gate-encoder python3 /app/scripts/compare_encodes.py
 
 Environment Variables:
     SOURCE_FOLDER       Path to source directory with original videos

@@ -1,6 +1,6 @@
 # Utilities
 
-### compare_encodes.py
+## compare_encodes.py
 
 A standalone diagnostic script that compares source and destination folders to report encoding coverage.
 
@@ -9,7 +9,7 @@ A standalone diagnostic script that compares source and destination folders to r
 python scripts/compare_encodes.py --source /media/movies --dest /media/movies-720p
 
 # Inside a running container
-docker exec quality-gate-encoder python /app/scripts/compare_encodes.py
+docker exec quality-gate-encoder python3 /app/scripts/compare_encodes.py
 
 # Output as JSON or CSV
 python scripts/compare_encodes.py -s /media/movies -d /media/movies-720p --format json
@@ -35,29 +35,32 @@ python scripts/compare_encodes.py -s /media/movies -d /media/movies-720p --show-
 ENCODING COMPARISON REPORT
 ================================================================================
 
-Source folder:      /media/movies
-Destination folder: /media/movies-720p
+Source folder:      /app/source
+Destination folder: /app/destination
 
 ----------------------------------------
 SUMMARY
 ----------------------------------------
-Total source files:     4,463
-Total destination files: 4,440
-Matched (encoded):      4,420
-Missing encodes:        23
-Orphaned encodes:       20
-Skipped (low quality):  20
+Total source files:     4
+Total destination files: 3
+Matched (encoded):      3
+Missing encodes:        1
+Orphaned encodes:       0
+Skipped (low quality):  0
 
 ----------------------------------------
-MISSING ENCODES (23 files, 45.2 GiB total)
+MISSING ENCODES (1 files, 90.9 MiB total)
 ----------------------------------------
-  [   2.1 GiB] Movie Title (2024) [BDRemux 1080p].mkv
-  [   1.8 GiB] Another Movie (2023) [UHD 2160p].mkv
-  ...
+  [    90.9 MiB] Elephants Dream (2006)/Elephants Dream (2006).mkv
 
 ================================================================================
-STATUS: Issues found - 23 missing encodes, 20 orphaned files
+STATUS: Issues found - 1 missing encodes
 ================================================================================
 ```
 
 </details>
+
+That is the report from the four-film demo library in [Getting started](getting-started.md#what-you-see-when-it-worked).
+Elephants Dream shows as missing although the encoder skipped it: the report judges quality from markers in the
+file name (`720p`, `480p`, `dvdrip` and similar), not with ffprobe, so a 576p file named without one is counted
+as a missing encode.

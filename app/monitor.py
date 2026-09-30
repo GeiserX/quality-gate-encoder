@@ -43,9 +43,9 @@ PRIORITY_FILE = os.getenv('PRIORITY_FILE') or os.path.join(SOURCE_FOLDER, '.enco
 
 # Symlink settings for Jellyfin multi-version support
 # SYMLINK_TARGET_PREFIX: The path prefix for symlink targets AS SEEN BY THE SOURCE HOST
-# Example: If source is mounted from watchtower, and dest is on geiserback,
-#          this should be watchtower's NFS mount path to geiserback's dest folder
-SYMLINK_TARGET_PREFIX = os.getenv('SYMLINK_TARGET_PREFIX', '')  # e.g., '/mnt/remotes/GEISERBACK_ShareMedia/Peliculas'
+# Example: the source is an NFS share of a NAS and the destination lives on the encoder box; set this to the
+# path at which the NAS (and Jellyfin) mount the destination, e.g. /mnt/remotes/nas/movies-720p
+SYMLINK_TARGET_PREFIX = os.getenv('SYMLINK_TARGET_PREFIX', '')  # e.g., '/mnt/remotes/nas/movies-720p'
 SYMLINK_VERSION_SUFFIX = os.getenv('SYMLINK_VERSION_SUFFIX', ' - 720p')  # Version suffix for symlinks
 
 # Manifest-based symlink management for cross-host setups.
