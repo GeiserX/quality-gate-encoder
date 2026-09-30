@@ -43,18 +43,18 @@ docker run -d --name quality-gate-encoder --restart always \
   drumsergio/quality-gate-encoder:1.5.12
 ```
 
-`SYMLINK_TARGET_PREFIX` is the destination folder as Jellyfin sees it, and the source mount must be writable, because the ` - 720p` link is written beside each original. It worked when `docker logs quality-gate-encoder` shows `Encoding succeeded` and `Created version symlink`, and the film's page in Jellyfin gets a Version menu with a 720p entry. The image is linux/amd64 only; drop `--device` to encode in software, and [Getting started](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/getting-started.md) has Docker Compose, NVIDIA and the switch from `drumsergio/jellyfin-encoder` (releases under the old name until 2027-03-31).
+`SYMLINK_TARGET_PREFIX` is the destination folder as Jellyfin sees it, and the source mount must be writable, because the ` - 720p` link is written beside each original. It worked when `docker logs quality-gate-encoder` shows `Encoding succeeded` and `Created version symlink`, and the film's page in Jellyfin gets a Version menu with a 720p entry. The image is linux/amd64 only; drop `--device` to encode in software, and [Getting started](https://geiserx.github.io/quality-gate-encoder/getting-started/) has Docker Compose, NVIDIA and the switch from `drumsergio/jellyfin-encoder` (releases under the old name until 2027-03-31).
 
 ## Documentation
 
-- [Getting started](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/getting-started.md): Docker Compose and CLI, Intel and NVIDIA, what the log and Jellyfin show when it worked, upgrading, moving from `jellyfin-encoder`
-- [Configuration](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/configuration.md): every variable and its default, quality presets, H.264/MP4 output, free-space floor, priority list, FFmpeg log level
-- [Cross-host manifest mode](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/cross-host.md): Jellyfin on a different box than the encoder
-- [Utilities](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/utilities.md): `compare_encodes.py`, the coverage report
-- [How it works](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/how-it-works.md): the pipeline, why it polls, what a rename costs
-- [Safety and cleanup](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/safety.md): the guards that stop a bad mount from deleting encodes
-- [Development](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/development.md): run from source, tests
-- [Related projects](https://github.com/GeiserX/quality-gate-encoder/blob/main/docs/related.md): the plugin and the other Jellyfin tools
+- [Getting started](https://geiserx.github.io/quality-gate-encoder/getting-started/): Docker Compose and CLI, Intel and NVIDIA, what the log and Jellyfin show when it worked, upgrading, moving from `jellyfin-encoder`
+- [Configuration](https://geiserx.github.io/quality-gate-encoder/configuration/): every variable and its default, quality presets, H.264/MP4 output, free-space floor, priority list, FFmpeg log level
+- [Cross-host manifest mode](https://geiserx.github.io/quality-gate-encoder/cross-host/): Jellyfin on a different box than the encoder
+- [Utilities](https://geiserx.github.io/quality-gate-encoder/utilities/): `compare_encodes.py`, the coverage report
+- [How it works](https://geiserx.github.io/quality-gate-encoder/how-it-works/): the pipeline, why it polls, what a rename costs
+- [Safety and cleanup](https://geiserx.github.io/quality-gate-encoder/safety/): the guards that stop a bad mount from deleting encodes
+- [Development](https://geiserx.github.io/quality-gate-encoder/development/): run from source, tests
+- [Related projects](https://geiserx.github.io/quality-gate-encoder/related/): the plugin and the other Jellyfin tools
 
 With the plugin: [One library, two qualities](https://github.com/GeiserX/quality-gate/blob/main/docs/one-library.md) and [Encode priority](https://github.com/GeiserX/quality-gate/blob/main/docs/encode-priority.md) on the Quality Gate side.
 

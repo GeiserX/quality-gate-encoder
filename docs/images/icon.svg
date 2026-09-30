@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="quality-gate-encoder">
+  <!-- Favicon: logo.svg on the banner's #17181d plate, so it reads on a light browser tab. -->
+  <rect width="128" height="128" rx="28" fill="#17181d"/>
+  <g transform="translate(20 20) scale(0.3259) translate(-100 -20)">
+    <rect x="100" y="140" width="270" height="150" rx="10" fill="#2a2c34"/>
+    <g stroke="#e9e4d8" stroke-width="2.5" stroke-linecap="round" opacity=".5"><path d="M118 186H352M118 238H352M235 238V290"/></g>
+    <clipPath id="icb"><rect x="100" y="110" width="270" height="28" rx="4"/></clipPath>
+    <g clip-path="url(#icb)">
+      <rect x="100" y="110" width="270" height="28" fill="#0c0d10"/>
+      <g fill="#f5f1e6"><path d="M76 110h24l-24 28h-24z"/><path d="M124 110h24l-24 28h-24z"/><path d="M172 110h24l-24 28h-24z"/><path d="M220 110h24l-24 28h-24z"/><path d="M268 110h24l-24 28h-24z"/><path d="M316 110h24l-24 28h-24z"/><path d="M364 110h24l-24 28h-24z"/><path d="M412 110h24l-24 28h-24z"/></g>
+    </g>
+    <clipPath id="ica"><rect x="100" y="80" width="270" height="28" rx="4"/></clipPath>
+    <g transform="rotate(-13 102 108)">
+      <g clip-path="url(#ica)">
+        <rect x="100" y="80" width="270" height="28" fill="#0c0d10"/>
+        <g fill="#f5f1e6"><path d="M76 80h24l-24 28h-24z"/><path d="M124 80h24l-24 28h-24z"/><path d="M172 80h24l-24 28h-24z"/><path d="M220 80h24l-24 28h-24z"/><path d="M268 80h24l-24 28h-24z"/><path d="M316 80h24l-24 28h-24z"/><path d="M364 80h24l-24 28h-24z"/><path d="M412 80h24l-24 28h-24z"/></g>
+      </g>
+    </g>
+    <circle cx="108" cy="109" r="9" fill="#9aa0ab"/>
+    <circle cx="108" cy="109" r="3.5" fill="#17181d"/>
+  </g>
+</svg>
