@@ -76,11 +76,17 @@ lrwxr-xr-x 1 root root       66 Sep 30 13:16 Big Buck Bunny (2008) - 720p.mp4 ->
 In Jellyfin, the film's page gets a **Version** menu with the copy, phones pick it, and the player's Playback
 Info reads Direct Play:
 
-<p align="center"><img src="images/screenshots/jellyfin-versions-mobile.png" alt="The film's page on a phone: the Version menu is set to 720p and the video line reads 720p H264" width="300"> <img src="images/screenshots/jellyfin-direct-play.png" alt="The Jellyfin player on the 720p copy with Playback Info open: Direct playing, 1280x720, H264" width="600"></p>
+<div class="qge-shot-row" markdown>
+
+![The film's page on a phone: the Version menu is set to 720p and the video line reads 720p H264](images/screenshots/jellyfin-versions-mobile.png)
+
+![The Jellyfin player on the 720p copy with Playback Info open: Direct playing, 1280x720, H264](images/screenshots/jellyfin-direct-play.png)
+
+</div>
 
 The library itself does not change: each title is listed once.
 
-<p align="center"><img src="images/screenshots/jellyfin-library.png" alt="The Movies library in Jellyfin after the run: four posters, each film once" width="900"></p>
+![The Movies library in Jellyfin after the run: four posters, each film once](images/screenshots/jellyfin-library.png)
 
 No Version menu? `SYMLINK_TARGET_PREFIX` is unset (the log has no `Created version symlink` line), the source
 mount is read-only (`Failed to create version symlink` in the log), or the prefix is not the path Jellyfin's
