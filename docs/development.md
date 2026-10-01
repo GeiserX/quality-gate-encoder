@@ -21,7 +21,9 @@ python -m pytest tests/ -v -rs
 
 FFmpeg must be installed: some tests encode real files. CI (`.github/workflows/docker-build.yml`) runs the same
 command on Python 3.12 with `--cov --cov-report=xml`. Every push to `main` then builds the image for
-`linux/amd64`, pushes it under both names with the next patch version, and tags that version.
+`linux/amd64`, pushes it under both names with the next patch version, and tags that version. CI pushes no `latest`
+tag. A push that only changes docs, Markdown files or the docs, stale and Docker Hub description
+workflows skips all of this.
 
 ## Pull requests
 

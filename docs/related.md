@@ -1,7 +1,7 @@
 # Related projects
 
 <p>
-  <a href="https://hub.docker.com/r/drumsergio/quality-gate-encoder"><img src="https://img.shields.io/docker/image-size/drumsergio/quality-gate-encoder/latest?style=flat-square&label=image%20size" alt="Docker Image Size"></a>
+  <a href="https://hub.docker.com/r/drumsergio/quality-gate-encoder"><img src="https://img.shields.io/docker/image-size/drumsergio/quality-gate-encoder?sort=semver&style=flat-square&label=image%20size" alt="Docker Image Size"></a>
   <a href="https://github.com/awesome-jellyfin/awesome-jellyfin#readme"><img src="https://img.shields.io/badge/listed%20on-awesome--jellyfin-00a4dc?style=flat-square&logo=jellyfin&logoColor=white" alt="listed on awesome-jellyfin"></a>
 </p>
 

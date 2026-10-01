@@ -3,14 +3,17 @@ name: Build and Push Docker Image
 on:
   push:
     branches: [main]
-    # A push that only touches docs publishes no image and cuts no tag: the
-    # version bump below runs in this job, so skipping the run skips both.
-    # README.md reaches Docker Hub through dockerhub-description.yml instead.
+    # A push that only touches docs or a workflow that never builds the image
+    # publishes no image and cuts no tag: the version bump below runs in this
+    # job, so skipping the run skips both. README.md reaches Docker Hub through
+    # dockerhub-description.yml instead.
     paths-ignore:
       - 'docs/**'
       - 'mkdocs.yml'
       - '**/*.md'
       - '.github/workflows/docs.yml'
+      - '.github/workflows/stale.yml'
+      - '.github/workflows/dockerhub-description.yml'
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -99,9 +102,9 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
+          # Version tags only. No :latest, so every install pins the version it runs.
           tags: |
             ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-            ${{ env.IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -125,7 +128,6 @@ jobs:
           build-args: IMAGE_MOVED_TO=${{ env.IMAGE_NAME }}
           tags: |
             ${{ env.OLD_IMAGE_NAME }}:${{ steps.version.outputs.version }}
-            ${{ env.OLD_IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
