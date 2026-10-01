@@ -3,6 +3,14 @@ name: Build and Push Docker Image
 on:
   push:
     branches: [main]
+    # A push that only touches docs publishes no image and cuts no tag: the
+    # version bump below runs in this job, so skipping the run skips both.
+    # README.md reaches Docker Hub through dockerhub-description.yml instead.
+    paths-ignore:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - '**/*.md'
+      - '.github/workflows/docs.yml'
   pull_request:
     branches: [main]
   workflow_dispatch:
