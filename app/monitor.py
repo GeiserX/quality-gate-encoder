@@ -726,11 +726,18 @@ def is_file_growing(file_path, check_interval=10):
     return size2 > size1
 
 def verify_encoded_file(file_path):
+    """True when ffprobe reads a positive duration from the encode.  Only stdout is parsed:
+    ffprobe's messages go to stderr, and FFmpeg 9 prints one ("Referenced QT chapter track
+    not found") for every MP4 it writes from a source with chapters, which read as part of
+    the number threw away good encodes."""
     cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v', '-show_entries', 'format=duration',
            '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
     try:
-        output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
-        duration = float(output.strip())
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                check=True)
+        if result.stderr.strip():
+            logging.info(f'ffprobe said while verifying {file_path}: {result.stderr.strip()}')
+        duration = float(result.stdout.strip())
         return duration > 0
     except Exception as e:
         logging.error(f'File verification error {file_path}: {e}')

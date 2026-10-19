@@ -378,15 +378,15 @@ class TestIsFileGrowing(TempDirTestBase):
 class TestVerifyEncodedFile(TempDirTestBase):
 
     def test_returns_true_for_valid_duration(self):
-        with patch('subprocess.check_output', return_value=b'120.5'):
+        with patch('subprocess.run', return_value=MagicMock(stdout='120.5', stderr='')):
             self.assertTrue(monitor.verify_encoded_file('/fake/movie.mkv'))
 
     def test_returns_false_for_zero_duration(self):
-        with patch('subprocess.check_output', return_value=b'0'):
+        with patch('subprocess.run', return_value=MagicMock(stdout='0', stderr='')):
             self.assertFalse(monitor.verify_encoded_file('/fake/movie.mkv'))
 
     def test_returns_false_on_exception(self):
-        with patch('subprocess.check_output', side_effect=Exception('ffprobe error')):
+        with patch('subprocess.run', side_effect=Exception('ffprobe error')):
             self.assertFalse(monitor.verify_encoded_file('/fake/movie.mkv'))
 
 
