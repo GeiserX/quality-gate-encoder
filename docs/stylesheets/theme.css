@@ -25,9 +25,13 @@
   --md-typeset-a-color: #e6b450;
 }
 
-/* Light scheme: #e6b450 on white is 1.9:1. #7a5200 is the same hue at 6.9:1. */
+/* Light scheme: #e6b450 on white is 1.9:1. #7a5200 is the same hue at 6.9:1.
+   Zensical's modern theme paints the current nav entry and hovered links in
+   the accent, so the accent takes the darker hue here too. */
 [data-md-color-scheme="default"] {
   --md-typeset-a-color: #7a5200;
+  --md-accent-fg-color: #7a5200;
+  --md-accent-fg-color--transparent: #7a52001a;
 }
 
 /* Fixed logo size so it does not crowd the site name. */
@@ -42,9 +46,15 @@
    .md-header__topic and the page title in a second one, and swaps them on
    scroll. Styling both would change every page title too. */
 .md-header__topic:first-child .md-ellipsis {
-  color: #f5f1e6;
   font-weight: 800;
   letter-spacing: -0.01em;
+}
+
+/* That colour only on the dark scheme: Zensical's modern header takes the page
+   background, so on the light scheme it is white and a light name would vanish.
+   There the name keeps the default text colour. */
+[data-md-color-scheme="slate"] .md-header__topic:first-child .md-ellipsis {
+  color: #f5f1e6;
 }
 
 /* Keep the mark and the name close, so they read as one unit. */
@@ -157,7 +167,7 @@
 }
 
 /* Getting started: the phone shot beside the player shot. The two images are
-   Markdown images in their own paragraphs inside a <div markdown>, so MkDocs
+   Markdown images in their own paragraphs inside a <div markdown>, so the build
    rewrites their paths for the /getting-started/ URL (a raw <img> is not
    rewritten and 404s there). */
 .md-typeset .qge-shot-row {
