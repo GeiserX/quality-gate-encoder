@@ -65,5 +65,5 @@ updates:
     commit-message:
       prefix: build(docs)
     labels:
-      - docs
+      - documentation
       - automated
