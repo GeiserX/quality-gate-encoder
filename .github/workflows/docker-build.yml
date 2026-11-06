@@ -9,9 +9,10 @@ on:
     # dockerhub-description.yml instead.
     paths-ignore:
       - 'docs/**'
-      - 'mkdocs.yml'
+      - 'zensical.toml'
       - '**/*.md'
       - '.github/workflows/docs.yml'
+      - '.github/scripts/site-check.py'
       - '.github/workflows/stale.yml'
       - '.github/workflows/dockerhub-description.yml'
   pull_request:
