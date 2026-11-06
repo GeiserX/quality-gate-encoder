@@ -85,8 +85,9 @@ jobs:
       - name: Check the built site
         run: python -I .github/scripts/site-check.py site
 
-      # Push to main only: workflow_dispatch can be run on any branch, and the
-      # push filter above does not apply to it. Same line as docs-pages-helm.yml.
+      # Pushes and manual runs on main only: workflow_dispatch can be run on any
+      # branch, and the push filter above does not apply to it, so the branch
+      # test is what keeps another branch from deploying.
       - name: Upload the site
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
@@ -94,7 +95,7 @@ jobs:
           path: site
 
   deploy:
-    # Runs on push to main only, after the build job has passed.
+    # Runs on pushes and manual runs on main, after the build job has passed.
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
